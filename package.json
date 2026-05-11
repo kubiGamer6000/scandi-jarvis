@@ -1,0 +1,54 @@
+{
+  "name": "scandi-jarvis",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Jarvis – an AI agent harness for managing the Scandi Gum ecommerce business. Built on LangChain + LangGraph DeepAgents.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "chat": "tsx src/apps/cli.ts",
+    "chat:jarvis": "tsx src/apps/cli.ts jarvis",
+    "smoke": "tsx scripts/smoke-test.ts",
+    "smoke:sandbox": "tsx scripts/sandbox-smoke.ts",
+    "smoke:shopify-skill": "tsx scripts/test-shopify-skill.ts",
+    "smoke:wa-client": "tsx scripts/wa-client-smoke.ts",
+    "smoke:wa-dispatcher": "tsx scripts/wa-dispatcher-smoke.ts",
+    "smoke:wa": "tsx scripts/wa-smoke.ts",
+    "wa:server": "tsx src/apps/whatsapp/server.ts",
+    "wa:server:watch": "tsx watch src/apps/whatsapp/server.ts",
+    "wa:summarize-cron": "tsx src/apps/whatsapp/summarize-cron.ts",
+    "test:tools": "tsx scripts/test-tools.ts",
+    "composio:list": "tsx scripts/composio-list.ts",
+    "dev:graph": "langgraphjs dev",
+    "dev:ui": "npm run dev --prefix frontends/deep-agents-ui",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@composio/core": "^0.9.0",
+    "@composio/langchain": "^0.9.0",
+    "@langchain/anthropic": "^1.3.29",
+    "@langchain/core": "^1.1.45",
+    "@langchain/deno": "^0.2.2",
+    "@langchain/langgraph": "^1.3.0",
+    "@langchain/langgraph-checkpoint-postgres": "^1.0.1",
+    "@langchain/tavily": "^1.2.0",
+    "@types/pg": "^8.20.0",
+    "deepagents": "^1.10.0",
+    "dotenv": "^17.4.2",
+    "fastify": "^5.8.5",
+    "langchain": "^1.4.0",
+    "p-queue": "^9.2.0",
+    "pg": "^8.20.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@langchain/langgraph-cli": "^1.2.1",
+    "@types/node": "^25.6.2",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.3"
+  }
+}
