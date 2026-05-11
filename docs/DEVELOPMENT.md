@@ -269,6 +269,17 @@ LOOP=1 npm run wa:summarize-cron
 
 Either deployment works against the same `jarvis.chat_context` table. A typical setup is the `wa:server` process running continuously plus the cron worker firing every hour. On the production droplet both run under systemd — see [`docs/DEPLOYMENT.md`](./DEPLOYMENT.md) §3-4.
 
+## Workflows (deterministic cron tasks)
+
+For scheduled tasks that don't need an LLM (daily expense report, spreadsheet refresh, etc.), use the workflow registry under `src/workflows/`. Each workflow is a `WorkflowDefinition` wired into the shared CLI runner.
+
+```bash
+npm run workflow:list                              # list every registered workflow
+npm run workflow -- run revolut-daily-expenses     # run one locally
+```
+
+In production each workflow gets its own systemd `.timer`; the service unit (`scandi-jarvis-workflow@.service`) is shared. See [`docs/WORKFLOWS.md`](./WORKFLOWS.md) for the full guide on adding a new one and [`docs/DEPLOYMENT.md`](./DEPLOYMENT.md) §4b for the systemd plumbing.
+
 ## Add a frontend
 
 Create a new package directory under `frontends/<app-name>/` with its own `package.json`, `tsconfig.json`, and build system (Vite/Next/etc.). Don't share the root `tsconfig.json` — frontends have a different module/runtime target. Talk to agents via an HTTP entrypoint in `src/apps/`, or via a [LangGraph deployment](https://docs.langchain.com/oss/javascript/deepagents/going-to-production).

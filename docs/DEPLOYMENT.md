@@ -30,6 +30,14 @@ Optional sidecar:
 user, Node 20, swap, fail2ban, ufw, and the bot itself are already in
 place. This doc only covers what's new for Jarvis.
 
+> **Sibling service: `scandi-revolut-expenses`.** The Revolut daily
+> expenses workflow ([`docs/WORKFLOWS.md`](./WORKFLOWS.md)) calls a
+> separate HTTP API that lives in its own repo and runs on the same
+> droplet as a third systemd unit. Deploy it per
+> [`scandi-revolut-expenses/docs/DEPLOYMENT.md`](../../scandi-revolut-expenses/docs/DEPLOYMENT.md)
+> before enabling the workflow timer in §4b — otherwise the run will
+> fail with `fetch failed` against `127.0.0.1:8080`.
+
 ---
 
 ## 1. Prerequisites already on the droplet
@@ -252,12 +260,19 @@ scandi ALL=(root) NOPASSWD: /bin/systemctl start scandi-wa-bot, \
                             /bin/systemctl stop scandi-jarvis-cron.timer, \
                             /bin/systemctl restart scandi-jarvis-cron.timer, \
                             /bin/systemctl status scandi-jarvis-cron.timer, \
+                            /bin/systemctl start scandi-jarvis-workflow*, \
+                            /bin/systemctl stop scandi-jarvis-workflow*, \
+                            /bin/systemctl restart scandi-jarvis-workflow*, \
+                            /bin/systemctl status scandi-jarvis-workflow*, \
+                            /bin/systemctl enable scandi-jarvis-workflow*, \
+                            /bin/systemctl disable scandi-jarvis-workflow*, \
                             /bin/systemctl reload caddy, \
                             /bin/systemctl restart caddy, \
                             /bin/systemctl status caddy, \
                             /bin/journalctl -u scandi-wa-bot *, \
                             /bin/journalctl -u scandi-jarvis *, \
                             /bin/journalctl -u scandi-jarvis-cron *, \
+                            /bin/journalctl -u scandi-jarvis-workflow*, \
                             /bin/journalctl -u caddy *
 ```
 
@@ -336,6 +351,129 @@ sudo journalctl -u scandi-jarvis-cron -n 50 --no-pager
 
 ---
 
+## 4b. Workflows (deterministic scheduled tasks)
+
+The `src/workflows/` system runs **deterministic, no-LLM** cron tasks
+that report results back via the WhatsApp API — daily expense reports,
+spreadsheet updates, etc. Distinct from the chat agent and from the
+summary cron above; they share only the `WhatsappClient` and the env
+loader.
+
+See [`docs/WORKFLOWS.md`](./WORKFLOWS.md) for what each workflow does
+and how to add a new one. Below is just the deployment plumbing.
+
+### 4b.1 Single template service (one file, used by every workflow)
+
+`/etc/systemd/system/scandi-jarvis-workflow@.service`:
+
+```ini
+[Unit]
+Description=scandi-jarvis workflow %i
+After=network-online.target scandi-jarvis.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=scandi
+Group=scandi
+WorkingDirectory=/opt/scandi-jarvis
+EnvironmentFile=/opt/scandi-jarvis/.env
+# %i is the systemd template instance — i.e. the workflow name.
+ExecStart=/usr/bin/node dist/apps/workflows-cron.js run %i
+
+# Belt + braces: long-running smart reports can take ~60s; cap at 5 min.
+TimeoutStartSec=5min
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/opt/scandi-jarvis
+ProtectKernelTunables=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=scandi-jarvis-workflow-%i
+```
+
+That's the only service file you ever need. Every workflow is run as
+`scandi-jarvis-workflow@<name>.service`.
+
+### 4b.2 One timer per workflow
+
+For each workflow you want to schedule, drop a `.timer` file. The
+matching `.service` is auto-resolved from the template above.
+
+**Example: `revolut-daily-expenses` at 00:01 Europe/Stockholm.**
+
+`/etc/systemd/system/scandi-jarvis-workflow-revolut-daily-expenses.timer`:
+
+```ini
+[Unit]
+Description=Daily Revolut expenses report (yesterday → WhatsApp)
+
+[Timer]
+Unit=scandi-jarvis-workflow@revolut-daily-expenses.service
+OnCalendar=*-*-* 00:01:00
+# Run in Europe/Stockholm wall-clock — matches the report's timezone.
+# (systemd v245+; falls back to UTC silently on older systems.)
+Persistent=true
+AccuracySec=30s
+RandomizedDelaySec=15s
+
+[Install]
+WantedBy=timers.target
+```
+
+Enable the workflow:
+
+```bash
+# Make sure the env vars exist first, otherwise the run fails immediately.
+grep -E '^(REVOLUT_EXPENSES_API_BASE_URL|REVOLUT_EXPENSES_API_KEY|WORKFLOW_REVOLUT_CHAT_JID|JARVIS_WORKFLOWS_DEFAULT_CHAT_JID)=' \
+     /opt/scandi-jarvis/.env
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now scandi-jarvis-workflow-revolut-daily-expenses.timer
+
+# Verify it's queued.
+systemctl list-timers 'scandi-jarvis-workflow-*' --no-pager
+
+# Run it once right now to validate end-to-end before midnight.
+sudo systemctl start scandi-jarvis-workflow@revolut-daily-expenses.service
+sudo journalctl -u scandi-jarvis-workflow@revolut-daily-expenses -n 50 --no-pager
+```
+
+### 4b.3 Specifying timezone (Stockholm wall-clock)
+
+If your droplet's `/etc/timezone` isn't already `Europe/Stockholm`,
+pin the calendar string explicitly:
+
+```ini
+[Timer]
+OnCalendar=*-*-* 00:01:00 Europe/Stockholm
+```
+
+This is supported on systemd 245+ (Ubuntu 22.04+). Set it in every
+`.timer` whose schedule you care about anchoring to local wall-clock.
+
+### 4b.4 Adding a new workflow
+
+1. Write the workflow under `src/workflows/<name>/index.ts` and register
+   it in `src/workflows/index.ts` — see [`docs/WORKFLOWS.md`](./WORKFLOWS.md).
+2. `jarvis deploy` to ship the build.
+3. Drop a new `.timer` file in `/etc/systemd/system/` named
+   `scandi-jarvis-workflow-<name>.timer` (the .service is reused).
+4. Add it to the sudoers rule (§3.5) and `enable --now` it.
+
+> The single `scandi-jarvis-workflow@.service` template never needs editing.
+
+---
+
 ## 5. The `jarvis` helper (paste into `~/.bashrc`)
 
 Mirrors the `bot` function in `scandi-wa-bot`'s `OPERATIONS.md`.
@@ -379,6 +517,58 @@ jarvis() {
         *)       echo "usage: jarvis cron {logs|tail [N]|status|list|run|enable|disable}" ;;
       esac ;;
 
+    workflow|wf)
+      shift
+      local wf="$1"; shift || true
+      case "$wf" in
+        list)
+          # Walk the registry from the built JS — single source of truth.
+          ( cd /opt/scandi-jarvis && /usr/bin/node dist/apps/workflows-cron.js list )
+          echo
+          echo "scheduled timers:"
+          systemctl list-timers 'scandi-jarvis-workflow-*' --no-pager 2>/dev/null \
+            | grep -E '(NEXT|scandi-jarvis-workflow)' || echo "  (none enabled)"
+          ;;
+        run)
+          local name="$1"
+          [ -z "$name" ] && { echo "usage: jarvis workflow run <name>"; return 2; }
+          sudo systemctl start "scandi-jarvis-workflow@${name}.service"
+          sudo journalctl -u "scandi-jarvis-workflow@${name}" -n 80 --no-pager
+          ;;
+        logs)
+          local name="$1"
+          [ -z "$name" ] && { echo "usage: jarvis workflow logs <name>"; return 2; }
+          sudo journalctl -u "scandi-jarvis-workflow@${name}" -f -o cat
+          ;;
+        tail)
+          local name="$1"; local n="${2:-100}"
+          [ -z "$name" ] && { echo "usage: jarvis workflow tail <name> [N]"; return 2; }
+          sudo journalctl -u "scandi-jarvis-workflow@${name}" -n "$n" --no-pager -o cat
+          ;;
+        status)
+          local name="$1"
+          [ -z "$name" ] && { echo "usage: jarvis workflow status <name>"; return 2; }
+          sudo systemctl status "scandi-jarvis-workflow-${name}.timer" --no-pager
+          echo
+          sudo systemctl status "scandi-jarvis-workflow@${name}.service" --no-pager
+          ;;
+        enable)
+          local name="$1"
+          [ -z "$name" ] && { echo "usage: jarvis workflow enable <name>"; return 2; }
+          sudo systemctl enable --now "scandi-jarvis-workflow-${name}.timer"
+          ;;
+        disable)
+          local name="$1"
+          [ -z "$name" ] && { echo "usage: jarvis workflow disable <name>"; return 2; }
+          sudo systemctl disable --now "scandi-jarvis-workflow-${name}.timer"
+          ;;
+        next)
+          systemctl list-timers 'scandi-jarvis-workflow-*' --no-pager
+          ;;
+        *)
+          echo "usage: jarvis workflow {list|run|logs|tail|status|enable|disable|next} [name]" ;;
+      esac ;;
+
     smoke)   cd /opt/scandi-jarvis && sudo -u scandi npx tsx scripts/wa-smoke.ts ;;
 
     *)
@@ -400,6 +590,11 @@ health               GET /health (loopback)
 smoke                run scripts/wa-smoke.ts end-to-end
 
 cron logs|tail|status|list|run|enable|disable
+workflow list                                   # all registered + scheduled
+workflow run     <name>                         # run one now (oneshot)
+workflow logs    <name> | tail <name> [N]
+workflow status  <name> | enable <name> | disable <name>
+workflow next                                   # next-firing timers
 EOF
       ;;
   esac
@@ -614,6 +809,7 @@ don't log on their own. See `src/core/tool-trace.ts`.
 | `MemoryMax=1500M` killed the service mid-run                                                       | Long conversation + big sandboxed tool output blew the cap.                                                        | Edit the unit, bump to `2G`, `daemon-reload`, restart. Long-term: tighten `JARVIS_WA_CONTEXT_MSGS` or `summarizationMiddleware`. |
 | Webhook deliveries pile up `pending` on the bot side                                               | Jarvis is up but each run takes longer than `WEBHOOK_TIMEOUT_MS` (default 10s). The webhook ACKs *before* the run starts so this is rare. | Check `jarvis logs` for slow tools. The dispatcher ACKs the webhook immediately; deliveries should be sub-second.        |
 | `LANGSMITH_TRACING=true` but nothing shows up                                                      | `LANGSMITH_API_KEY` missing or project name typo'd.                                                                | Check `LANGSMITH_PROJECT` in `.env` matches a project you can see in smith.langchain.com.                                      |
+| Workflow `revolut-daily-expenses` fails: `RevolutExpensesHttpError: …` or `fetch failed` against `127.0.0.1:8080` | The `scandi-revolut-expenses` API isn't running on the droplet, or `REVOLUT_EXPENSES_API_KEY` doesn't match the API's `API_KEYS`. | `revolut status` / `revolut health` to confirm. Then re-check the key in `/opt/scandi-jarvis/.env` against `/opt/scandi-revolut-expenses/.env`. See [scandi-revolut-expenses/docs/DEPLOYMENT.md](../../scandi-revolut-expenses/docs/DEPLOYMENT.md). |
 
 ### Common forensic SQL
 

@@ -115,6 +115,10 @@ A separate Postgres schema (`jarvis.chat_context`, `jarvis.wa_webhook_seen`) hol
 
 Full operational guide: [WHATSAPP.md](./WHATSAPP.md). Design history: [WHATSAPP_PLAN.md](./WHATSAPP_PLAN.md).
 
+### Workflows (`src/workflows/`)
+
+Sitting beside the chat agent is a small registry of **deterministic, no-LLM scheduled tasks** — daily expense reports, spreadsheet refreshes, etc. Each one is a `WorkflowDefinition` with a `run(ctx)` method; the shared CLI runner (`src/apps/workflows-cron.ts`) loads env, builds a `WhatsappClient`, calls `run`, and exits with a meaningful code. In production each workflow is wired to its own systemd `.timer`; the matching service template (`scandi-jarvis-workflow@.service`) is shared. Workflows use the same WA REST client the agent uses to post results back to chats. Operational guide: [WORKFLOWS.md](./WORKFLOWS.md).
+
 ## Configuration
 
 All runtime config flows through [`src/core/env.ts`](../src/core/env.ts), which validates `process.env` with Zod and exposes a typed `env` object. Modules **must not** read `process.env` directly — that way every variable is documented in one place, and missing required values fail fast with a readable error.

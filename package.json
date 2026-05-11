@@ -19,6 +19,8 @@
     "wa:server": "tsx src/apps/whatsapp/server.ts",
     "wa:server:watch": "tsx watch src/apps/whatsapp/server.ts",
     "wa:summarize-cron": "tsx src/apps/whatsapp/summarize-cron.ts",
+    "workflow": "tsx src/apps/workflows-cron.ts",
+    "workflow:list": "tsx src/apps/workflows-cron.ts list",
     "test:tools": "tsx scripts/test-tools.ts",
     "composio:list": "tsx scripts/composio-list.ts",
     "dev:graph": "langgraphjs dev",

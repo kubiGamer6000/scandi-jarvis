@@ -90,6 +90,20 @@ const EnvSchema = z.object({
   // Min interval (ms) between two outbound WA tool calls within one run.
   JARVIS_WA_MIN_SEND_INTERVAL_MS: z.coerce.number().int().min(0).default(500),
 
+  // --- workflows (deterministic scheduled tasks) ---------------------------
+  // Default destination chat for workflow notifications. Workflows can
+  // override per-task via their own env var (e.g. WORKFLOW_REVOLUT_CHAT_JID),
+  // but most use this. Same JID format as JARVIS_WA_ALLOWED_CHATS entries.
+  JARVIS_WORKFLOWS_DEFAULT_CHAT_JID: z.string().optional(),
+
+  // Revolut expenses API (https://github.com/<you>/scandi-revolut-expenses).
+  // Used by the `revolut-daily-expenses` workflow.
+  REVOLUT_EXPENSES_API_BASE_URL: z.string().url().optional(),
+  REVOLUT_EXPENSES_API_KEY: z.string().optional(),
+  // Override the destination for the daily Revolut report. Falls back to
+  // JARVIS_WORKFLOWS_DEFAULT_CHAT_JID if unset.
+  WORKFLOW_REVOLUT_CHAT_JID: z.string().optional(),
+
   // --- runtime -------------------------------------------------------------
   LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
