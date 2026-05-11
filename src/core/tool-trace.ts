@@ -44,14 +44,16 @@ function asString(v: unknown): string {
  * `extraMeta` is mixed into every line — pass `chat_jid` from the WA runner
  * so multiple concurrent chats are trivially greppable.
  */
-export function createToolTracer(extraMeta: Record<string, unknown> = {}) {
+export function createToolTracer(
+  extraMeta: Record<string, unknown> = {},
+): BaseCallbackHandler {
   const starts = new Map<string, number>();
   const names = new Map<string, string>();
 
   return new (class extends BaseCallbackHandler {
-    name = "ToolTraceHandler";
+    override name = "ToolTraceHandler";
 
-    handleToolStart(
+    override handleToolStart(
       tool: { name?: string; id?: string[] } | Record<string, unknown>,
       input: string,
       runId: string,
@@ -82,7 +84,7 @@ export function createToolTracer(extraMeta: Record<string, unknown> = {}) {
       });
     }
 
-    handleToolEnd(output: unknown, runId: string): void {
+    override handleToolEnd(output: unknown, runId: string): void {
       const ms = starts.has(runId) ? Date.now() - (starts.get(runId) ?? 0) : undefined;
       const name = names.get(runId) ?? "unknown_tool";
       starts.delete(runId);
@@ -100,7 +102,7 @@ export function createToolTracer(extraMeta: Record<string, unknown> = {}) {
       });
     }
 
-    handleToolError(err: Error, runId: string): void {
+    override handleToolError(err: Error, runId: string): void {
       const ms = starts.has(runId) ? Date.now() - (starts.get(runId) ?? 0) : undefined;
       const name = names.get(runId) ?? "unknown_tool";
       starts.delete(runId);

@@ -237,7 +237,7 @@ Avoid putting business logic in the entrypoint — keep it in the agent definiti
 
 ## WhatsApp frontend
 
-The `src/apps/whatsapp/` app exposes Jarvis as a WhatsApp bot via [scandi-wa-bot](../../scandi-wa-bot/). See [`docs/WHATSAPP.md`](./WHATSAPP.md) for the operational doc.
+The `src/apps/whatsapp/` app exposes Jarvis as a WhatsApp bot via [scandi-wa-bot](../../scandi-wa-bot/). See [`docs/WHATSAPP.md`](./WHATSAPP.md) for the operational doc, and [`docs/DEPLOYMENT.md`](./DEPLOYMENT.md) for putting it on the production droplet alongside the bot.
 
 Quick start:
 
@@ -267,7 +267,7 @@ npm run wa:summarize-cron
 LOOP=1 npm run wa:summarize-cron
 ```
 
-Either deployment works against the same `jarvis.chat_context` table. A typical setup is the `wa:server` process running continuously plus the cron worker firing every hour.
+Either deployment works against the same `jarvis.chat_context` table. A typical setup is the `wa:server` process running continuously plus the cron worker firing every hour. On the production droplet both run under systemd — see [`docs/DEPLOYMENT.md`](./DEPLOYMENT.md) §3-4.
 
 ## Add a frontend
 
