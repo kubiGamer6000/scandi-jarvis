@@ -3,9 +3,11 @@ import type { StructuredTool } from "@langchain/core/tools";
 
 import { definition as jarvisDef } from "../../agents/jarvis/index.js";
 import { buildAgent } from "../../core/agent.js";
+import { env } from "../../core/env.js";
 import { createLogger } from "../../core/logger.js";
 import { getSandbox, isSandboxConfigured } from "../../core/sandbox.js";
 import { createWhatsappRateLimitMiddleware } from "../../core/wa-rate-limit.js";
+import { createRevolutTools } from "../../tools/revolut/index.js";
 import { createWhatsappTools, WhatsappContextSchema } from "../../tools/whatsapp/index.js";
 
 import type { WhatsappClient } from "./client.js";
@@ -43,10 +45,21 @@ export async function buildWhatsappAgent(opts: BuildWhatsappAgentOptions) {
   const sandbox = isSandboxConfigured() ? await getSandbox() : null;
   const waTools = createWhatsappTools(opts.client, sandbox ? { backend: sandbox } : {});
 
+  // Revolut tools are opt-in: they need both env vars to point at the
+  // scandi-revolut-expenses HTTP API. If either is missing we skip them
+  // entirely (the agent prompt mentions them only because we wire them
+  // here — without registration they'd just be dead text).
+  const revolutEnabled = Boolean(
+    env.REVOLUT_EXPENSES_API_BASE_URL && env.REVOLUT_EXPENSES_API_KEY,
+  );
+  const revolutTools = revolutEnabled ? createRevolutTools(opts.client) : [];
+
   log.info("Building WhatsApp Jarvis", {
     waTools: waTools.map((t: StructuredTool) => t.name),
+    revolutTools: revolutTools.map((t: StructuredTool) => t.name),
     baseTools: jarvisDef.tools.map((t) => t.name),
     file_backend: sandbox ? `deno:${sandbox.id}` : "state",
+    revolut_enabled: revolutEnabled,
   });
 
   const rateLimit = createWhatsappRateLimitMiddleware();
@@ -54,7 +67,7 @@ export async function buildWhatsappAgent(opts: BuildWhatsappAgentOptions) {
   const agent = await buildAgent({
     ...jarvisDef,
     name: "jarvis-whatsapp",
-    tools: [...jarvisDef.tools, ...waTools],
+    tools: [...jarvisDef.tools, ...waTools, ...revolutTools],
     contextSchema: WhatsappContextSchema,
     enableMemory: opts.checkpointer,
     extraMiddleware: [rateLimit],

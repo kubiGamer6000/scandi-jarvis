@@ -6,9 +6,8 @@ import { env } from "../../core/env.js";
  * Tiny typed client for the scandi-revolut-expenses HTTP API.
  *
  * Single bearer token, single base URL, single endpoint we care about
- * (`GET /v1/report`). Kept in this workflow's folder rather than under
- * `src/apps/` because nothing else in the project talks to it — co-locating
- * the client with its only caller keeps the dependency local.
+ * (`GET /v1/report`). Used by both the agent's Revolut tools (in this
+ * folder) and the `revolut-daily-expenses` workflow.
  */
 export interface RevolutReportParams {
   /** `today` | `yesterday` | `this-week` | `last-week` | `on` | `range`. */

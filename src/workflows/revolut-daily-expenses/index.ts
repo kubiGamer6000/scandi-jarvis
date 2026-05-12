@@ -1,8 +1,7 @@
 import { env } from "../../core/env.js";
+import { createRevolutExpensesClient } from "../../tools/revolut/client.js";
 
 import type { WorkflowDefinition } from "../types.js";
-
-import { createRevolutExpensesClient } from "./client.js";
 
 /**
  * Daily Revolut expenses report.
