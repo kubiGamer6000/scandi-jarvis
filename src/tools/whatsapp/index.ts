@@ -1,4 +1,5 @@
 import type { AnyBackendProtocol } from "deepagents";
+import type { DenoSandbox } from "@langchain/deno";
 import type { StructuredTool } from "@langchain/core/tools";
 
 import type { WhatsappClient } from "../../apps/whatsapp/client.js";
@@ -24,6 +25,13 @@ export interface CreateWhatsappToolsOptions {
    * them. The WA app wires this when a sandbox is configured.
    */
   backend?: AnyBackendProtocol;
+  /**
+   * Optional Deno sandbox handle. When set, `send-file` reads bytes directly
+   * via `sandbox.instance.fs.readFile` (binary-safe). Without this, sending
+   * any binary file the agent wrote inside the sandbox (.docx, .pdf, .zip…)
+   * gets corrupted by the wrapper SDK's UTF-8 `cat` round-trip.
+   */
+  sandbox?: DenoSandbox;
 }
 
 /**
@@ -38,12 +46,16 @@ export function createWhatsappTools(
   options: CreateWhatsappToolsOptions = {},
 ): StructuredTool[] {
   const fileOpts = options.backend !== undefined ? { backend: options.backend } : {};
+  const sendOpts = {
+    ...fileOpts,
+    ...(options.sandbox !== undefined ? { sandbox: options.sandbox } : {}),
+  };
   return [
     createSendMessageTool(client),
     createReactTool(client),
     createEditMessageTool(client),
     createPullFileTool(client, fileOpts),
-    createSendFileTool(client, fileOpts),
+    createSendFileTool(client, sendOpts),
     createFetchMessagesTool(client),
     createGetMessageTool(client),
     createRememberTool(),

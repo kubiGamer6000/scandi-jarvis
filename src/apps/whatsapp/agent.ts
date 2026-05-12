@@ -43,7 +43,10 @@ export async function buildWhatsappAgent(opts: BuildWhatsappAgentOptions) {
   // they default to a separate StateBackend and the agent's sandbox-written
   // files look "not found" to the uploader.
   const sandbox = isSandboxConfigured() ? await getSandbox() : null;
-  const waTools = createWhatsappTools(opts.client, sandbox ? { backend: sandbox } : {});
+  const waTools = createWhatsappTools(
+    opts.client,
+    sandbox ? { backend: sandbox, sandbox } : {},
+  );
 
   // Revolut tools are opt-in: they need both env vars to point at the
   // scandi-revolut-expenses HTTP API. If either is missing we skip them
