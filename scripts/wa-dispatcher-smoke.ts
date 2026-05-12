@@ -117,6 +117,48 @@ const l5 = formatMessageLine(
 );
 assert(l5.includes("🗑"), "tombstone marker");
 
+/* ---- group @mention detection (PN/LID + device suffix) ---- */
+section("messageMentionsBot");
+const { messageMentionsBot } = await import("../src/apps/whatsapp/mentions.js");
+const groupChat = { jid: "120363012345678901@g.us", type: "group" as const };
+const mentionSelf = {
+  pnJid: "46701234567@s.whatsapp.net",
+  lidJid: "123456789012345@lid",
+};
+assert(
+  messageMentionsBot(
+    baseMsg({
+      chat: groupChat,
+      mentioned_self: false,
+      mentioned_jids: ["46701234567:2@s.whatsapp.net"],
+    }),
+    mentionSelf,
+  ),
+  "fallback: mentioned_jids uses :device suffix, me has bare PN",
+);
+assert(
+  messageMentionsBot(
+    baseMsg({
+      chat: groupChat,
+      mentioned_self: true,
+      mentioned_jids: [],
+    }),
+    mentionSelf,
+  ),
+  "mentioned_self true wins without jids",
+);
+assert(
+  !messageMentionsBot(
+    baseMsg({
+      chat: groupChat,
+      mentioned_self: false,
+      mentioned_jids: ["999999999@s.whatsapp.net"],
+    }),
+    mentionSelf,
+  ),
+  "no match when someone else is mentioned",
+);
+
 /* ---- dispatcher state machine ---- */
 section("Dispatcher state machine");
 const { Dispatcher } = await import("../src/apps/whatsapp/dispatcher.js");

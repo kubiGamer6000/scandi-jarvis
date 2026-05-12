@@ -4,6 +4,7 @@ import { createLogger } from "../../core/logger.js";
 import type { WhatsappAgent } from "./agent.js";
 import type { WhatsappClient } from "./client.js";
 import { parseCommand } from "./commands.js";
+import { messageMentionsBot } from "./mentions.js";
 import { runOnce, type RunOutcome } from "./runner.js";
 import type { MessagePayload } from "./types.js";
 import { isChatAllowed } from "./whitelist.js";
@@ -400,12 +401,25 @@ export class Dispatcher {
     // it has been observed to return "lid" for LID-addressed chats. Always
     // also check the JID suffix — every group JID ends in `@g.us`.
     const isGroup = m.chat.type === "group" || m.chat.jid.endsWith("@g.us");
-    if (isGroup && !m.mentioned_self) {
+    const botMentioned = messageMentionsBot(m, {
+      pnJid: this.deps.self.pnJid,
+      lidJid: this.deps.self.lidJid,
+    });
+    if (isGroup && !botMentioned) {
       log.debug("dropping group msg without @mention", {
         chat_jid: m.chat.jid,
         seq: m.seq,
+        mentioned_self: m.mentioned_self,
+        mentioned_jids: m.mentioned_jids,
       });
       return false;
+    }
+    if (isGroup && botMentioned && !m.mentioned_self) {
+      log.info("group @mention accepted via mentioned_jids fallback", {
+        chat_jid: m.chat.jid,
+        seq: m.seq,
+        mentioned_jids: m.mentioned_jids,
+      });
     }
     if (!m.text && !m.caption && !m.media) {
       log.debug("dropping message with no text/caption/media", {
