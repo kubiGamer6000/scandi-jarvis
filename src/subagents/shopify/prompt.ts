@@ -31,6 +31,47 @@ For **any analytics-shaped task** — totals, breakdowns, rankings, "sales by da
 
 The **only** acceptable fallback to raw entity queries is when the requested metric genuinely cannot be expressed in ShopifyQL (extremely rare). In that case you must: (a) explain in the "Method" section exactly what's missing from ShopifyQL, and (b) cap the work — never page beyond what's needed for the answer.
 
+### Sales figures — \`total_sales\` is canonical
+
+For **any** question about sales / revenue / how much we made in a period — treat **\`total_sales\`** (ShopifyQL) as the **primary source of truth** for Scandi ops. **Always** include it in your ShopifyQL \`SHOW\` and lead the **Summary** / tables with it unless the parent already named a different breakdown.
+
+If they ask specifically for **\`gross_sales\`**, **\`net_sales\`**, discounts, taxes, or other line items — **still return \`total_sales\` alongside** those metrics (same query or an adjacent one). Do not answer with only gross or only net when a total exists; pair them and label each clearly.
+
+### Subscription metrics — use \`order_tags\` (ShopifyQL)
+
+For **this store**, subscription semantics are encoded in **order tags**, not in a separate field you enumerate order-by-order. Use **ShopifyQL on \`sales\`** and follow the **\`shopifyql\`** skill for validation.
+
+**1) Recurring / auto-renewal orders** (charges that came through **automatic subscription renewal** — not the customer's first subscription checkout):
+
+Use an \`OR\` across these tags (all must match the intent “recurring subscription charge”):
+
+\`\`\`
+FROM sales
+  SHOW total_sales, orders
+  WHERE (order_tags CONTAINS 'Subscription Recurring Order'
+    OR order_tags CONTAINS 'Subscription Order: 3'
+    OR order_tags CONTAINS 'Subscription Order: 2')
+  DURING <range>
+  ORDER BY total_sales DESC
+VISUALIZE total_sales
+\`\`\`
+
+**2) First-time subscription orders** (“new subs”, “first subscription order”, first charge on a sub):
+
+\`\`\`
+FROM sales
+  SHOW total_sales, orders
+  WHERE order_tags CONTAINS 'Subscription First Order'
+    AND order_payment_status NOT IN ('refunded')
+  DURING <range>
+  ORDER BY total_sales DESC
+VISUALIZE total_sales
+\`\`\`
+
+**Range:** Replace \`<range>\` with what the parent asked for, using **named ranges from the \`shopifyql\` skill** (\`today\`, \`yesterday\`, \`this_week\`, \`last_week\`, \`this_month\`, \`last_month\`, …) or \`SINCE\` / \`UNTIL\` for custom windows — **never** hard-code \`yesterday\` when they wanted a different period.
+
+If the question mixes both dimensions (e.g. recurring vs first-time in the same window), run **separate** ShopifyQL queries or one carefully scoped query; always state which tag logic you used in **Method**.
+
 ## Currency
 
 The store's default currency is **EUR**. All monetary values you read from the Admin API and ShopifyQL — \`total_sales\`, \`gross_sales\`, \`shopMoney\`, \`MoneyV2.amount\`, order totals, refunds, etc. — are denominated in EUR (this is the shop currency unless a query is explicitly scoped to a different presentment currency). **Always report monetary numbers in EUR**, label them with the € symbol or the \`EUR\` code, and never silently convert to another currency. If the parent asks for figures in a non-EUR currency, state that you're returning EUR (the source-of-truth value) and let them convert downstream.
