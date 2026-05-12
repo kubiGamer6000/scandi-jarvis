@@ -591,6 +591,7 @@ After running `comment.py` (see Step 2), add markers to document.xml. For replie
 ## Dependencies
 
 - **pandoc**: Text extraction
-- **docx**: `npm install -g docx` (new documents)
+- **docx**: `npm install docx` in a project dir (or global in the sandbox); `require('docx')` must resolve when running Node
+- **validate.py**: Python 3 with **`defusedxml`** (`python3 -m pip install defusedxml` — use `python3 -m pip` if `pip` is not on `PATH` in the sandbox)
 - **LibreOffice**: PDF conversion (auto-configured for sandboxed environments via `scripts/office/soffice.py`)
 - **Poppler**: `pdftoppm` for images

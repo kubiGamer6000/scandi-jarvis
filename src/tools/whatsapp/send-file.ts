@@ -2,6 +2,8 @@ import { Buffer } from "node:buffer";
 
 import {
   type AnyBackendProtocol,
+  type ReadRawResult,
+  type ReadResult,
   StateBackend,
   resolveBackend,
 } from "deepagents";
@@ -222,6 +224,67 @@ function bytesForUpload(
   };
 }
 
+/**
+ * DeepAgents `read()` line-paginates and may decode binary as UTF-8 (U+FFFD).
+ * `readRaw()` returns {@link FileData} with `Uint8Array` for true binary — required for .docx from the sandbox.
+ */
+type BackendWithReadRaw = AnyBackendProtocol & {
+  readRaw?: (filePath: string) => Promise<{
+    error?: string;
+    data?: { content?: string | Uint8Array | string[]; mimeType?: string };
+  }>;
+};
+
+async function readPayloadForSend(
+  resolved: AnyBackendProtocol,
+  filePath: string,
+  ext: string,
+): Promise<{ ok: true; raw: string | Uint8Array } | { ok: false; error: string }> {
+  const needRawBytes = STRICT_BINARY_EXT.has(ext.toLowerCase());
+  const withRaw = resolved as BackendWithReadRaw;
+
+  if (needRawBytes && typeof withRaw.readRaw === "function") {
+    try {
+      const rawRes = (await withRaw.readRaw(filePath)) as ReadRawResult;
+      if (!rawRes.error && rawRes.data != null) {
+        const data = rawRes.data;
+        const c =
+          "mimeType" in data && "content" in data && !Array.isArray(data.content)
+            ? (data as { content: string | Uint8Array }).content
+            : null;
+        if (c instanceof Uint8Array) {
+          log.debug("send-file using readRaw (binary)", {
+            path: filePath,
+            byteLength: c.byteLength,
+          });
+          return { ok: true, raw: c };
+        }
+        if (typeof c === "string") {
+          return { ok: true, raw: c };
+        }
+      }
+    } catch (err) {
+      log.warn("readRaw failed, falling back to read()", {
+        path: filePath,
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  const readOut = (await resolved.read(filePath)) as ReadResult | string;
+  if (typeof readOut === "string") {
+    return { ok: true, raw: readOut };
+  }
+  const readResult = readOut;
+  if (readResult.error || readResult.content == null) {
+    return {
+      ok: false,
+      error: readResult.error ?? `file not found: ${filePath}`,
+    };
+  }
+  return { ok: true, raw: readResult.content };
+}
+
 export function createSendFileTool(
   client: WhatsappClient,
   options: { backend?: AnyBackendProtocol } = {},
@@ -248,18 +311,18 @@ export function createSendFileTool(
       // result generically.
       let bytes: Buffer;
       try {
-        const readResult = await resolved.read(input.path);
-        if (readResult.error || readResult.content == null) {
-          return JSON.stringify({
-            ok: false,
-            error: readResult.error ?? `file not found: ${input.path}`,
-          });
-        }
-        const raw = readResult.content;
         const detectedPath = detectKindAndMime(input.path, {
           ...(input.kind !== undefined ? { kind: input.kind } : {}),
         });
-        const decoded = bytesForUpload(raw, detectedPath.ext);
+        const payload = await readPayloadForSend(
+          resolved,
+          input.path,
+          detectedPath.ext,
+        );
+        if (!payload.ok) {
+          return JSON.stringify({ ok: false, error: payload.error });
+        }
+        const decoded = bytesForUpload(payload.raw, detectedPath.ext);
         if (!decoded.ok) {
           return JSON.stringify({ ok: false, error: decoded.error });
         }
@@ -324,7 +387,7 @@ export function createSendFileTool(
       name: "whatsapp_send_file",
       description:
         "Send a file from your virtual filesystem to the current WhatsApp chat. Detects kind by extension (png/jpg → image, mp3/m4a → audio, mp4/mov → video, everything else → document). " +
-        "Rejects obvious corrupt Office/PDF/images (bad magic or UTF-8 mojibake) instead of sending a broken attachment. " +
+        "For Office/ZIP/PDF/images, reads binary via backend readRaw when available (sandbox-safe). " +
         "Use `kind` to override (e.g. `kind=\"audio\"` + `as_voice_note=true` to send a voice note). Provide an absolute `path` you've already written via `write_file` or `whatsapp_pull_file`.",
       schema: z.object({
         path: z
