@@ -6,7 +6,7 @@ This is the living inventory of every agent in the project. Keep it short — on
 
 | Key      | Source                                        | Model (default)             | Tools                                                                | Subagents                            | Skill sets         | Purpose                                                                                                            |
 | -------- | --------------------------------------------- | --------------------------- | -------------------------------------------------------------------- | ------------------------------------ | ------------------ | ------------------------------------------------------------------------------------------------------------------ |
-| `jarvis` | [`src/agents/jarvis/`](../src/agents/jarvis/) | `anthropic:claude-opus-4-6` | local: `getCurrentDatetime`, `calculator`, `internetSearch`          | `shopify-agent`, `general-purpose`\* | _(none yet)_       | General-purpose Scandi Gum operations assistant — plans, researches, calculates, drafts. Delegates Shopify work.   |
+| `jarvis` | [`src/agents/jarvis/`](../src/agents/jarvis/) | `anthropic:claude-opus-4-6` | local: `getCurrentDatetime`, `calculator`, `internetSearch`, `tavilyDeepResearch`          | `shopify-agent`, `general-purpose`\* | _(none yet)_       | General-purpose Scandi Gum operations assistant — plans, researches, calculates, drafts. Delegates Shopify work.   |
 
 \* `general-purpose` is auto-attached by the DeepAgents harness.
 

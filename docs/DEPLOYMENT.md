@@ -129,7 +129,7 @@ Recommended optional vars:
 | -------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
 | `DENO_DEPLOY_TOKEN` (+ `DENO_DEPLOY_ORG` for personal tokens)  | Adds the `execute` shell tool + lets skill scripts run. Strongly recommended.         |
 | `COMPOSIO_API_KEY` / `COMPOSIO_USER_ID`                        | Required for the Shopify subagent.                                                    |
-| `TAVILY_API_KEY`                                               | Enables `internet_search` (otherwise the tool returns an error string).               |
+| `TAVILY_API_KEY`                                               | Enables Tavily `internet_search` and `tavily_deep_research` (without it both return an error string). |
 | `LANGSMITH_TRACING=true` / `LANGSMITH_API_KEY` / `LANGSMITH_PROJECT` | Trace every run in <https://smith.langchain.com>. Cheap and worth it.            |
 | `LOG_LEVEL`                                                    | `info` in prod, `debug` while debugging.                                              |
 

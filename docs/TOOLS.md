@@ -13,6 +13,7 @@ Custom tools live under `src/tools/<domain>/<name>.ts` and are indexed by stable
 | `getCurrentDatetime` | [`time/current-datetime.ts`](../src/tools/time/current-datetime.ts) | —                                       | Current date/time in any IANA timezone. Use before reasoning about "today", "this week", etc.                       |
 | `calculator`         | [`math/calculator.ts`](../src/tools/math/calculator.ts)             | —                                       | Safe arithmetic evaluator (+ - * / % **, parens, sci notation, abs/sqrt/log/exp/trig, pi/e). No `eval()`.            |
 | `internetSearch`     | [`web/internet-search.ts`](../src/tools/web/internet-search.ts)     | `TAVILY_API_KEY`                        | Web search via [Tavily](https://tavily.com/). Returns clear "not configured" error if the key is missing.          |
+| `tavilyDeepResearch` | [`web/deep-research.ts`](../src/tools/web/deep-research.ts)         | `TAVILY_API_KEY`                        | [Tavily Research](https://tavily.com/) — multi-search synthesis, **model `pro`**, polled until done. Slower than search; optional structured `output_schema`. |
 
 ## Composio toolkits
 
@@ -76,6 +77,7 @@ export const myAgentTools = pickTools([
   "getCurrentDatetime",
   "calculator",
   "internetSearch",
+  "tavilyDeepResearch",
 ]);
 ```
 

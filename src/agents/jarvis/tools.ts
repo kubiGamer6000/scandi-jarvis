@@ -11,6 +11,7 @@ export const JARVIS_TOOL_NAMES = [
   "getCurrentDatetime",
   "calculator",
   "internetSearch",
+  "tavilyDeepResearch",
 ] as const satisfies readonly ToolName[];
 
 export const jarvisTools = pickTools(JARVIS_TOOL_NAMES);

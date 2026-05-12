@@ -2,6 +2,7 @@ import type { StructuredTool } from "@langchain/core/tools";
 
 import { calculator } from "./math/calculator.js";
 import { getCurrentDatetime } from "./time/current-datetime.js";
+import { tavilyDeepResearch } from "./web/deep-research.js";
 import { internetSearch } from "./web/internet-search.js";
 
 /**
@@ -15,13 +16,14 @@ import { internetSearch } from "./web/internet-search.js";
  *
  * Why a registry?
  *   - Makes the available tool surface visible in one place.
- *   - Lets agent definitions stay declarative (`["calculator", "internetSearch"]`).
+ *   - Lets agent definitions stay declarative (`["calculator", "internetSearch", "tavilyDeepResearch"]`).
  *   - Makes it trivial to expose the tool list to a UI / docs page later.
  */
 export const tools = {
   calculator,
   getCurrentDatetime,
   internetSearch,
+  tavilyDeepResearch,
 } as const satisfies Record<string, StructuredTool>;
 
 export type ToolName = keyof typeof tools;

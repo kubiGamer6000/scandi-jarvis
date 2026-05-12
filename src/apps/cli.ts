@@ -40,7 +40,7 @@ function preflightChecks(): void {
   }
   if (!hasCredential("TAVILY_API_KEY")) {
     console.warn(
-      "⚠️   TAVILY_API_KEY not set – the internet_search tool will return an error if used.",
+      "⚠️   TAVILY_API_KEY not set – internet_search and tavily_deep_research will return an error if used.",
     );
   }
   if (!isSandboxConfigured()) {
