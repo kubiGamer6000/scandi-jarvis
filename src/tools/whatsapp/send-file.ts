@@ -73,6 +73,155 @@ function detectKindAndMime(
   return { kind, mimetype, ext };
 }
 
+/**
+ * Extensions where string content must round-trip as real binary (ZIP/PDF/images).
+ * If the virtual FS held UTF-8 text (e.g. from write_file pasting read_file output),
+ * bytes get U+FFFD or line-number junk — Word reports the file corrupt.
+ */
+const STRICT_BINARY_EXT = new Set([
+  "docx",
+  "doc",
+  "xlsx",
+  "xls",
+  "pptx",
+  "ppt",
+  "pdf",
+  "zip",
+  "png",
+  "jpg",
+  "jpeg",
+  "gif",
+  "webp",
+]);
+
+function utf8ReplacementCount(buf: Buffer): number {
+  let n = 0;
+  for (let i = 0; i + 2 < buf.length; i++) {
+    if (buf[i] === 0xef && buf[i + 1] === 0xbf && buf[i + 2] === 0xbd) {
+      n++;
+      i += 2;
+    }
+  }
+  return n;
+}
+
+function validateBinaryMagic(ext: string, buf: Buffer): boolean {
+  const e = ext.toLowerCase();
+  if (buf.length < 4) return false;
+  switch (e) {
+    case "docx":
+    case "xlsx":
+    case "pptx":
+    case "zip":
+      return buf[0] === 0x50 && buf[1] === 0x4b;
+    case "pdf":
+      return buf.subarray(0, 4).equals(Buffer.from("%PDF"));
+    case "doc":
+    case "xls":
+    case "ppt": {
+      const ole =
+        buf[0] === 0xd0 && buf[1] === 0xcf && buf[2] === 0x11 && buf[3] === 0xe0;
+      return ole || (buf[0] === 0x50 && buf[1] === 0x4b);
+    }
+    case "png":
+      return (
+        buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47
+      );
+    case "jpg":
+    case "jpeg":
+      return buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff;
+    case "gif":
+      return (
+        buf.subarray(0, 6).equals(Buffer.from("GIF87a")) ||
+        buf.subarray(0, 6).equals(Buffer.from("GIF89a"))
+      );
+    case "webp":
+      return buf.length >= 12 && buf.subarray(8, 12).equals(Buffer.from("WEBP"));
+    default:
+      return true;
+  }
+}
+
+function bytesForUpload(
+  raw: string | Uint8Array,
+  ext: string,
+): { ok: true; bytes: Buffer } | { ok: false; error: string } {
+  const strict = STRICT_BINARY_EXT.has(ext.toLowerCase());
+
+  if (typeof raw !== "string") {
+    const bytes = Buffer.from(raw as Uint8Array);
+    if (strict && !validateBinaryMagic(ext, bytes)) {
+      return {
+        ok: false,
+        error: `Bytes on disk do not look like a valid .${ext} (wrong file signature). Rebuild the file in the sandbox; do not paste tool output into write_file.`,
+      };
+    }
+    return { ok: true, bytes };
+  }
+
+  const text = raw;
+
+  if (!strict) {
+    const e = ext.toLowerCase();
+    const mime = MIME_BY_EXT[e] ?? "";
+    const isPlain =
+      mime.startsWith("text/") ||
+      e === "txt" ||
+      e === "md" ||
+      e === "csv" ||
+      e === "json" ||
+      e === "html" ||
+      e === "htm";
+    if (isPlain) {
+      return { ok: true, bytes: Buffer.from(text, "utf-8") };
+    }
+    const isLikelyBinary = e in KIND_BY_EXT || (mime.length > 0 && !mime.startsWith("text/"));
+    if (isLikelyBinary && /^[A-Za-z0-9+/=\s]+$/.test(text)) {
+      try {
+        return { ok: true, bytes: Buffer.from(text, "base64") };
+      } catch {
+        return { ok: true, bytes: Buffer.from(text, "utf-8") };
+      }
+    }
+    return { ok: true, bytes: Buffer.from(text, "utf-8") };
+  }
+
+  // Strict: prefer base64 (whatsapp_pull_file), then verify magic. Never accept mojibake UTF-8.
+  const compact = text.replace(/\s/g, "");
+  if (
+    compact.length >= 16 &&
+    /^[A-Za-z0-9+/]+=*$/.test(compact) &&
+    compact.length % 4 !== 1
+  ) {
+    const fromB64 = Buffer.from(compact, "base64");
+    if (validateBinaryMagic(ext, fromB64)) {
+      return { ok: true, bytes: fromB64 };
+    }
+  }
+
+  const asUtf8 = Buffer.from(text, "utf-8");
+  const replacements = utf8ReplacementCount(asUtf8);
+  if (replacements > 40 || (asUtf8.length > 0 && replacements / asUtf8.length > 0.003)) {
+    return {
+      ok: false,
+      error:
+        "File looks like binary that was stored as UTF-8 text (many U+FFFD replacement bytes). " +
+        "Regenerate: run docx-js / pack.py / Packer in `execute` so the .docx lives as real bytes on disk, or use whatsapp_pull_file (base64). " +
+        "Never copy read_file / tool transcripts into write_file for .docx.",
+    };
+  }
+
+  if (validateBinaryMagic(ext, asUtf8)) {
+    return { ok: true, bytes: asUtf8 };
+  }
+
+  return {
+    ok: false,
+    error: `Not a valid .${ext} after read (missing ZIP/PDF/image signature). ` +
+      "If the path is from write_file, the model probably injected text line numbers or re-encoded OXML — rebuild only via sandbox scripts writing bytes.",
+  };
+}
+
 export function createSendFileTool(
   client: WhatsappClient,
   options: { backend?: AnyBackendProtocol } = {},
@@ -106,33 +255,15 @@ export function createSendFileTool(
             error: readResult.error ?? `file not found: ${input.path}`,
           });
         }
-        // Different backends return string (state) vs Uint8Array (sandbox).
-        // Normalise to a string for the binary-detection heuristic below.
         const raw = readResult.content;
-        const text =
-          typeof raw === "string"
-            ? raw
-            : Buffer.from(raw as Uint8Array).toString("utf-8");
-
-        // Heuristic: if the file we just wrote came in via pull-file with
-        // base64 encoding, the content will be valid base64. Try base64 first
-        // for binary kinds, fall back to utf-8.
-        const detected = detectKindAndMime(input.path, {
+        const detectedPath = detectKindAndMime(input.path, {
           ...(input.kind !== undefined ? { kind: input.kind } : {}),
         });
-        const isLikelyBinary =
-          detected.kind !== "document" || detected.mimetype !== "text/plain";
-        if (typeof raw !== "string") {
-          bytes = Buffer.from(raw as Uint8Array);
-        } else if (isLikelyBinary && /^[A-Za-z0-9+/=\s]+$/.test(text)) {
-          try {
-            bytes = Buffer.from(text, "base64");
-          } catch {
-            bytes = Buffer.from(text, "utf-8");
-          }
-        } else {
-          bytes = Buffer.from(text, "utf-8");
+        const decoded = bytesForUpload(raw, detectedPath.ext);
+        if (!decoded.ok) {
+          return JSON.stringify({ ok: false, error: decoded.error });
         }
+        bytes = decoded.bytes;
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         log.warn("read failed", {
@@ -193,7 +324,7 @@ export function createSendFileTool(
       name: "whatsapp_send_file",
       description:
         "Send a file from your virtual filesystem to the current WhatsApp chat. Detects kind by extension (png/jpg → image, mp3/m4a → audio, mp4/mov → video, everything else → document). " +
-        "Sets correct mimetype for pdf, docx/xlsx/pptx, etc. — omitting that makes WhatsApp show generic BIN. " +
+        "Rejects obvious corrupt Office/PDF/images (bad magic or UTF-8 mojibake) instead of sending a broken attachment. " +
         "Use `kind` to override (e.g. `kind=\"audio\"` + `as_voice_note=true` to send a voice note). Provide an absolute `path` you've already written via `write_file` or `whatsapp_pull_file`.",
       schema: z.object({
         path: z
