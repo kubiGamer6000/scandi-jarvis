@@ -48,6 +48,13 @@ const MIME_BY_EXT: Record<string, string> = {
   m4a: "audio/mp4",
   flac: "audio/flac",
   pdf: "application/pdf",
+  /** OOXML / legacy Office — needed so WA doesn't label attachments as generic BIN */
+  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  doc: "application/msword",
+  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  xls: "application/vnd.ms-excel",
+  pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  ppt: "application/vnd.ms-powerpoint",
   csv: "text/csv",
   json: "application/json",
   txt: "text/plain",
@@ -186,6 +193,7 @@ export function createSendFileTool(
       name: "whatsapp_send_file",
       description:
         "Send a file from your virtual filesystem to the current WhatsApp chat. Detects kind by extension (png/jpg → image, mp3/m4a → audio, mp4/mov → video, everything else → document). " +
+        "Sets correct mimetype for pdf, docx/xlsx/pptx, etc. — omitting that makes WhatsApp show generic BIN. " +
         "Use `kind` to override (e.g. `kind=\"audio\"` + `as_voice_note=true` to send a voice note). Provide an absolute `path` you've already written via `write_file` or `whatsapp_pull_file`.",
       schema: z.object({
         path: z
