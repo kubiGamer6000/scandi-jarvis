@@ -19,6 +19,8 @@ export const definition: AgentDefinition = {
     "General-purpose Scandi Gum operations assistant. Plans, researches, calculates, and drafts. Delegates all Shopify work to the shopify-agent subagent.",
   systemPrompt: JARVIS_SYSTEM_PROMPT,
   tools: jarvisTools,
+  /** Docx and other shared capabilities under `skills/jarvis/`. GP subagent inherits these. */
+  skillSets: ["jarvis"],
   subagents: [shopifySubagent],
 };
 

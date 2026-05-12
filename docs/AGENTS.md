@@ -6,7 +6,7 @@ This is the living inventory of every agent in the project. Keep it short — on
 
 | Key      | Source                                        | Model (default)             | Tools                                                                | Subagents                            | Skill sets         | Purpose                                                                                                            |
 | -------- | --------------------------------------------- | --------------------------- | -------------------------------------------------------------------- | ------------------------------------ | ------------------ | ------------------------------------------------------------------------------------------------------------------ |
-| `jarvis` | [`src/agents/jarvis/`](../src/agents/jarvis/) | `anthropic:claude-opus-4-6` | local: `getCurrentDatetime`, `calculator`, `internetSearch`, `tavilyDeepResearch`          | `shopify-agent`, `general-purpose`\* | _(none yet)_       | General-purpose Scandi Gum operations assistant — plans, researches, calculates, drafts. Delegates Shopify work.   |
+| `jarvis` | [`src/agents/jarvis/`](../src/agents/jarvis/) | `anthropic:claude-opus-4-6` | local: `getCurrentDatetime`, `calculator`, `internetSearch`, `tavilyDeepResearch`          | `shopify-agent`, `general-purpose`\* | `jarvis`           | General-purpose Scandi Gum operations assistant — plans, researches, calculates, drafts. Delegates Shopify work. Skills include docx tooling under `skills/jarvis/docx/`.   |
 
 \* `general-purpose` is auto-attached by the DeepAgents harness.
 
@@ -20,10 +20,11 @@ This is the living inventory of every agent in the project. Keep it short — on
 
 Each skill set lives at `skills/<set>/<skill>/SKILL.md`. They're loaded into the agent's system prompt via [DeepAgents progressive disclosure](https://docs.langchain.com/oss/javascript/deepagents/skills), so the agent only reads a skill's body when it's relevant. See [`docs/DEVELOPMENT.md#skills`](./DEVELOPMENT.md#skills) for layout and authoring.
 
-| Set       | Skill            | Used by         | What it provides                                                                                                                                |
-| --------- | ---------------- | --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| `shopify` | `shopify-admin`  | `shopify-agent` | Official Shopify skill: schema-aware GraphQL authoring (`search_docs.mjs`) + offline validation (`validate.mjs`) against the bundled Admin schema. |
-| `shopify` | `shopifyql`      | `shopify-agent` | ShopifyQL authoring guide for the `shopifyqlQuery` analytics endpoint — keyword order, time controls, recipes, GraphQL wiring.                  |
+| Set       | Skill            | Used by                     | What it provides                                                                                                                                |
+| --------- | ---------------- | --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `jarvis`  | `docx`           | `jarvis`, `general-purpose`\* | Word (.docx) authoring, unpack/edit/repack, validation, Office helpers; run scripts with `execute` when the sandbox is enabled. |
+| `shopify` | `shopify-admin`  | `shopify-agent`             | Official Shopify skill: schema-aware GraphQL authoring (`search_docs.mjs`) + offline validation (`validate.mjs`) against the bundled Admin schema. |
+| `shopify` | `shopifyql`      | `shopify-agent`             | ShopifyQL authoring guide for the `shopifyqlQuery` analytics endpoint — keyword order, time controls, recipes, GraphQL wiring.                  |
 
 ## Run an agent
 
