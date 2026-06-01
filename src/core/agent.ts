@@ -239,11 +239,18 @@ export async function buildAgent(def: AgentDefinition) {
   // When the sandbox is the default backend AND we have skill sets, sync the
   // host skill files into the sandbox before each invocation so the agent
   // can actually `execute` scripts that ship with a skill.
+  //
+  // We pass `getSandbox` as a callable (not the captured `sandbox` instance)
+  // so the middleware can re-fetch a fresh, health-probed handle on every
+  // run. Long-lived processes (the WhatsApp server) routinely outlive their
+  // remote Deno sandbox; without this, every run after the sandbox dies
+  // tries to upload to a zombie handle and the per-file `uploadFiles`
+  // errors all collapse to a generic `"invalid_path"`.
   const skillsMiddleware =
     sandbox && wantsSkills
       ? [
           createSkillsSandboxSyncMiddleware({
-            sandbox,
+            getSandbox,
             skillsRoot: SKILLS_ROOT,
             virtualPrefix: SKILLS_VIRTUAL_PREFIX,
           }),

@@ -10,6 +10,7 @@ import type { DenoSandbox } from "@langchain/deno";
 import { z } from "zod";
 
 import { createLogger } from "../../core/logger.js";
+import { isSandboxClosedError } from "../../core/sandbox.js";
 import type { WhatsappClient } from "../../apps/whatsapp/client.js";
 
 import { readWhatsappContext, type WhatsappContext } from "./runtime-context.js";
@@ -78,36 +79,43 @@ export interface CreateSendFileToolOptions {
   /** Optional virtual-FS backend used for state-only / non-sandbox paths. */
   backend?: AnyBackendProtocol;
   /**
-   * Optional Deno sandbox. When provided, send-file reads bytes directly via
-   * `sandbox.instance.fs.readFile` (binary-safe RPC) instead of going through
-   * the deepagents/Deno wrapper's `cat`-based `downloadFiles`, which UTF-8
-   * decodes stdout and **destroys binary bytes** (every non-UTF-8 byte becomes
-   * `0xef 0xbf 0xbd` — U+FFFD). That's why `.docx` / `.pdf` files generated
-   * inside the sandbox come out unopenable. We fall back to `backend.read()`
-   * for paths the sandbox can't see (state-only files, etc.).
+   * Resolver for the current (healthy) Deno sandbox. When provided, send-file
+   * reads bytes directly via `sandbox.instance.fs.readFile` (binary-safe RPC)
+   * instead of going through the deepagents/Deno wrapper's `cat`-based
+   * `downloadFiles`, which UTF-8 decodes stdout and **destroys binary bytes**
+   * (every non-UTF-8 byte becomes `0xef 0xbf 0xbd` — U+FFFD). That's why
+   * `.docx` / `.pdf` files generated inside the sandbox come out unopenable.
+   *
+   * The resolver is called per-invocation (not captured at build time) so a
+   * stale/closed sandbox is replaced automatically. Pass `getSandbox` from
+   * `core/sandbox.ts` — it health-probes the cache and re-provisions on need.
    */
-  sandbox?: DenoSandbox;
+  getSandbox?: (opts?: { force?: boolean }) => Promise<DenoSandbox | null>;
 }
 
 /**
  * Try to read a file from the Deno sandbox's filesystem byte-for-byte.
  *
- * Returns the bytes or `null` if the sandbox isn't running / the file isn't
- * there. The caller falls back to `backend.read()` on null.
+ * Returns the bytes, `null` for "not in this sandbox" (caller falls back to
+ * `backend.read()`), or `{ closed: true }` when the connection died mid-read
+ * so the caller can re-provision and retry.
  */
 async function readFromSandbox(
-  sandbox: DenoSandbox | undefined,
+  sandbox: DenoSandbox | null,
   path: string,
   signal: AbortSignal | undefined,
-): Promise<Buffer | null> {
+): Promise<{ bytes: Buffer } | { closed: true } | null> {
   if (!sandbox || !sandbox.isRunning) return null;
   try {
     const data = await sandbox.instance.fs.readFile(
       path,
       signal ? { signal } : undefined,
     );
-    return Buffer.from(data);
+    return { bytes: Buffer.from(data) };
   } catch (err) {
+    if (isSandboxClosedError(err)) {
+      return { closed: true };
+    }
     const message = err instanceof Error ? err.message : String(err);
     log.debug("sandbox.fs.readFile miss; will fall back to backend.read()", {
       path,
@@ -122,7 +130,7 @@ export function createSendFileTool(
   options: CreateSendFileToolOptions = {},
 ) {
   const backend = options.backend ?? new StateBackend();
-  const sandbox = options.sandbox;
+  const getSandbox = options.getSandbox;
 
   return tool(
     async (
@@ -141,12 +149,39 @@ export function createSendFileTool(
       try {
         // 1) Preferred path: read straight from the sandbox FS over RPC.
         //    Binary-safe. Works for anything the agent wrote with `execute`
-        //    (docx/pdf/zip/etc.) or `write_file`.
-        const sandboxBytes = await readFromSandbox(
-          sandbox,
-          input.path,
-          runtime.signal,
-        );
+        //    (docx/pdf/zip/etc.) or `write_file`. Retry once if the cached
+        //    sandbox handle is stale.
+        let sandboxBytes: Buffer | null = null;
+        if (getSandbox) {
+          let sandbox = await getSandbox();
+          let attempt = await readFromSandbox(
+            sandbox,
+            input.path,
+            runtime.signal,
+          );
+          if (attempt && "closed" in attempt) {
+            log.warn(
+              "Sandbox closed mid-read; re-provisioning and retrying once",
+              { path: input.path },
+            );
+            sandbox = await getSandbox({ force: true });
+            attempt = await readFromSandbox(
+              sandbox,
+              input.path,
+              runtime.signal,
+            );
+            if (attempt && "closed" in attempt) {
+              return JSON.stringify({
+                ok: false,
+                error:
+                  "sandbox connection closed; could not re-provision in time",
+              });
+            }
+          }
+          if (attempt && "bytes" in attempt) {
+            sandboxBytes = attempt.bytes;
+          }
+        }
 
         if (sandboxBytes) {
           bytes = sandboxBytes;

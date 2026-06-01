@@ -42,10 +42,15 @@ export async function buildWhatsappAgent(opts: BuildWhatsappAgentOptions) {
   // shell (`execute mkdir -p … && cat > /home/app/wa-out/…`). Without this
   // they default to a separate StateBackend and the agent's sandbox-written
   // files look "not found" to the uploader.
+  //
+  // We pass `getSandbox` as a *callable* (not the boot-time instance) so
+  // send-file re-fetches a fresh, health-probed handle each run. Long-lived
+  // WA servers routinely outlive their underlying Deno sandbox; without this
+  // a single sandbox blip permanently breaks file sends until restart.
   const sandbox = isSandboxConfigured() ? await getSandbox() : null;
   const waTools = createWhatsappTools(
     opts.client,
-    sandbox ? { backend: sandbox, sandbox } : {},
+    sandbox ? { backend: sandbox, getSandbox } : {},
   );
 
   // Revolut tools are opt-in: they need both env vars to point at the

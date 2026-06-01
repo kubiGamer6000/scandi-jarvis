@@ -26,12 +26,16 @@ export interface CreateWhatsappToolsOptions {
    */
   backend?: AnyBackendProtocol;
   /**
-   * Optional Deno sandbox handle. When set, `send-file` reads bytes directly
-   * via `sandbox.instance.fs.readFile` (binary-safe). Without this, sending
-   * any binary file the agent wrote inside the sandbox (.docx, .pdf, .zip…)
-   * gets corrupted by the wrapper SDK's UTF-8 `cat` round-trip.
+   * Optional Deno sandbox resolver. When set, `send-file` reads bytes via
+   * `sandbox.instance.fs.readFile` (binary-safe). Without this, sending any
+   * binary file the agent wrote inside the sandbox (.docx, .pdf, .zip…) gets
+   * corrupted by the wrapper SDK's UTF-8 `cat` round-trip.
+   *
+   * Pass a *callable* (not the resolved instance) so the tool can re-fetch
+   * a fresh, health-probed handle each run — long-lived WA servers routinely
+   * outlive their underlying Deno sandbox.
    */
-  sandbox?: DenoSandbox;
+  getSandbox?: (opts?: { force?: boolean }) => Promise<DenoSandbox | null>;
 }
 
 /**
@@ -48,7 +52,9 @@ export function createWhatsappTools(
   const fileOpts = options.backend !== undefined ? { backend: options.backend } : {};
   const sendOpts = {
     ...fileOpts,
-    ...(options.sandbox !== undefined ? { sandbox: options.sandbox } : {}),
+    ...(options.getSandbox !== undefined
+      ? { getSandbox: options.getSandbox }
+      : {}),
   };
   return [
     createSendMessageTool(client),

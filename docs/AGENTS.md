@@ -23,6 +23,7 @@ Each skill set lives at `skills/<set>/<skill>/SKILL.md`. They're loaded into the
 | Set       | Skill            | Used by                     | What it provides                                                                                                                                |
 | --------- | ---------------- | --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
 | `jarvis`  | `docx`           | `jarvis`, `general-purpose`\* | Word (.docx) authoring, unpack/edit/repack, validation, Office helpers; run scripts with `execute` when the sandbox is enabled. |
+| `jarvis`  | `pdf`            | `jarvis`, `general-purpose`\* | PDF workflows: text/table extraction, merge/split, rotation, watermarks, form fill, encrypt/decrypt, OCR, image extraction; Python + CLI tooling via `execute`. |
 | `shopify` | `shopify-admin`  | `shopify-agent`             | Official Shopify skill: schema-aware GraphQL authoring (`search_docs.mjs`) + offline validation (`validate.mjs`) against the bundled Admin schema. |
 | `shopify` | `shopifyql`      | `shopify-agent`             | ShopifyQL authoring guide for the `shopifyqlQuery` analytics endpoint — keyword order, time controls, recipes, GraphQL wiring.                  |
 

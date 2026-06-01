@@ -7,6 +7,7 @@ import { createMiddleware } from "langchain";
 import type { DenoSandbox } from "@langchain/deno";
 
 import { createLogger } from "./logger.js";
+import { isSandboxClosedError } from "./sandbox.js";
 
 const log = createLogger("core/skills-sync");
 
@@ -141,7 +142,16 @@ async function writeBinary(
  * rather than failing the whole invocation.
  */
 export function createSkillsSandboxSyncMiddleware(opts: {
-  sandbox: DenoSandbox;
+  /**
+   * Resolver returning the current (healthy) sandbox handle. Long-lived
+   * processes can lose the underlying sandbox without warning (Deno timing
+   * out a `"session"` sandbox, network blips, etc.); the resolver gives the
+   * middleware a fresh handle on every run instead of holding a stale one.
+   *
+   * Pass {@link getSandbox} from `core/sandbox.ts` — it probes the cached
+   * handle and re-provisions when needed.
+   */
+  getSandbox: (opts?: { force?: boolean }) => Promise<DenoSandbox | null>;
   skillsRoot: string;
   /**
    * Sandbox path prefix the files should be uploaded under, mirroring the
@@ -151,16 +161,60 @@ export function createSkillsSandboxSyncMiddleware(opts: {
    */
   virtualPrefix: string;
 }) {
-  const { sandbox, skillsRoot, virtualPrefix } = opts;
+  const { getSandbox, skillsRoot, virtualPrefix } = opts;
+
+  /** Single upload attempt against a given sandbox. Returns `false` if the
+   *  sandbox connection died mid-flight (caller may retry on a fresh handle). */
+  async function uploadOnce(
+    sandbox: DenoSandbox,
+    textPayload: Array<[string, Uint8Array]>,
+    binaryPayload: Array<[string, Uint8Array]>,
+  ): Promise<{ ok: true } | { ok: false; closed: boolean; error: string }> {
+    try {
+      if (textPayload.length > 0) {
+        const results = await sandbox.uploadFiles(textPayload);
+        const failed = results.filter((r) => r.error);
+        if (failed.length > 0) {
+          // The wrapper SDK maps any unrecognised error (incl. "Connection to
+          // the sandbox was already closed") to the generic `"invalid_path"`
+          // code, so we can't distinguish at this level. Heuristic: if EVERY
+          // file failed, the sandbox almost certainly died – signal "closed"
+          // so the caller retries.
+          const allFailed = failed.length === results.length;
+          if (allFailed) {
+            return {
+              ok: false,
+              closed: true,
+              error: `uploadFiles failed for all ${failed.length} files (likely stale sandbox)`,
+            };
+          }
+          log.warn("Some text skill files failed to upload", {
+            failed: failed.map((r) => ({ path: r.path, error: r.error })),
+          });
+        }
+      }
+
+      if (binaryPayload.length > 0) {
+        await Promise.all(
+          binaryPayload.map(([p, bytes]) => writeBinary(sandbox, p, bytes)),
+        );
+      }
+
+      log.debug("Synced skills into sandbox", {
+        textFiles: textPayload.length,
+        binaryFiles: binaryPayload.length,
+        sandboxId: sandbox.id,
+      });
+      return { ok: true };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return { ok: false, closed: isSandboxClosedError(err), error: message };
+    }
+  }
 
   return createMiddleware({
     name: "JarvisSkillsSandboxSync",
     beforeAgent: async () => {
-      if (!sandbox.isRunning) {
-        log.warn("Sandbox not running – skipping skills upload");
-        return undefined;
-      }
-
       const filePaths = await walkFiles(skillsRoot);
       if (filePaths.length === 0) {
         return undefined;
@@ -184,33 +238,39 @@ export function createSkillsSandboxSyncMiddleware(opts: {
         }
       }
 
-      try {
-        if (textPayload.length > 0) {
-          const results = await sandbox.uploadFiles(textPayload);
-          const failed = results.filter((r) => r.error);
-          if (failed.length > 0) {
-            log.warn("Some text skill files failed to upload", {
-              failed: failed.map((r) => ({ path: r.path, error: r.error })),
-            });
-          }
-        }
-
-        if (binaryPayload.length > 0) {
-          await Promise.all(
-            binaryPayload.map(([p, bytes]) => writeBinary(sandbox, p, bytes)),
-          );
-        }
-
-        log.debug("Synced skills into sandbox", {
-          textFiles: textPayload.length,
-          binaryFiles: binaryPayload.length,
-          sandboxId: sandbox.id,
-        });
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        log.error("Skills upload to sandbox failed", { error: message });
+      let sandbox = await getSandbox();
+      if (!sandbox) {
+        log.warn("No sandbox available – skipping skills upload");
+        return undefined;
       }
 
+      const first = await uploadOnce(sandbox, textPayload, binaryPayload);
+      if (first.ok) return undefined;
+
+      if (!first.closed) {
+        log.error("Skills upload to sandbox failed", { error: first.error });
+        return undefined;
+      }
+
+      // Connection died. Force a fresh sandbox and retry once.
+      log.warn(
+        "Skills upload hit closed sandbox – re-provisioning and retrying once",
+        { error: first.error },
+      );
+      sandbox = await getSandbox({ force: true });
+      if (!sandbox) {
+        log.error(
+          "Skills upload retry aborted: could not re-provision sandbox",
+        );
+        return undefined;
+      }
+      const second = await uploadOnce(sandbox, textPayload, binaryPayload);
+      if (!second.ok) {
+        log.error("Skills upload to sandbox failed after retry", {
+          error: second.error,
+          closed: second.closed,
+        });
+      }
       return undefined;
     },
   });

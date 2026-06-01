@@ -159,7 +159,8 @@ Skills are reusable, on-demand capability bundles loaded via _progressive disclo
 ```
 skills/
 ├── jarvis/                  ← skill set for the main Jarvis agent (+ general-purpose subagent)
-│   └── docx/                Word .docx workflows + Python/JS tooling (executed via `execute` in sandbox)
+│   ├── docx/                Word .docx workflows + Python/JS tooling (executed via `execute` in sandbox)
+│   └── pdf/                 PDF read/extract/merge/split/OCR/form-fill workflows + Python helpers
 └── shopify/                 ← skill set for the shopify subagent
     ├── shopify-admin/       Admin GraphQL: docs search + schema validation
     │   ├── SKILL.md
