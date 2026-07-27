@@ -13,6 +13,7 @@ import type {
   MessagePayload,
   SendRequest,
   SendResponse,
+  TypingResponse,
 } from "./types.js";
 
 const log = createLogger("apps/whatsapp/client");
@@ -75,6 +76,20 @@ export interface WhatsappClient {
   react(seq: number, emoji: string, opts?: RequestOpts): Promise<void>;
   /** POST /v1/messages/:seq/edit — requires from_me=true on the target. */
   edit(seq: number, text: string, opts?: RequestOpts): Promise<EditResponse>;
+  /**
+   * POST /v1/chats/:jid/typing — open or extend a typing session.
+   *
+   * The bot keeps the WhatsApp chatstate alive until `ttl_ms` lapses, we call
+   * `stopTyping`, or it sends a message to the chat. Call it again before the
+   * TTL expires to hold the indicator through a long run.
+   */
+  startTyping(
+    chatJid: string,
+    args?: { state?: "composing" | "recording"; ttlMs?: number },
+    opts?: RequestOpts,
+  ): Promise<TypingResponse>;
+  /** DELETE /v1/chats/:jid/typing — idempotent; safe to call in a `finally`. */
+  stopTyping(chatJid: string, opts?: RequestOpts): Promise<void>;
 }
 
 export interface RequestOpts {
@@ -289,6 +304,29 @@ export function createWhatsappClient(
         body: { text },
         signal: opts?.signal,
       });
+    },
+    startTyping(chatJid, args, opts) {
+      return call<TypingResponse>(
+        "POST",
+        `/v1/chats/${encodeURIComponent(chatJid)}/typing`,
+        {
+          body: {
+            state: args?.state ?? "composing",
+            ...(args?.ttlMs !== undefined ? { ttl_ms: args.ttlMs } : {}),
+          },
+          signal: opts?.signal,
+        },
+      );
+    },
+    async stopTyping(chatJid, opts) {
+      await call<void>(
+        "DELETE",
+        `/v1/chats/${encodeURIComponent(chatJid)}/typing`,
+        {
+          parse: "void",
+          signal: opts?.signal,
+        },
+      );
     },
   };
 }

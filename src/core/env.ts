@@ -89,6 +89,21 @@ const EnvSchema = z.object({
   JARVIS_WA_MAX_SENDS_PER_RUN: z.coerce.number().int().min(1).default(8),
   // Min interval (ms) between two outbound WA tool calls within one run.
   JARVIS_WA_MIN_SEND_INTERVAL_MS: z.coerce.number().int().min(0).default(500),
+  // Show "typing…" in the chat while a run is in flight. The bot owns the
+  // chatstate refresh cadence; Jarvis only opens and closes the session.
+  JARVIS_WA_TYPING_ENABLED: z
+    .union([z.literal("true"), z.literal("false")])
+    .default("true"),
+  // How often we re-assert the typing session while a run is in flight. Must
+  // stay comfortably below JARVIS_WA_TYPING_TTL_MS.
+  JARVIS_WA_TYPING_KEEPALIVE_MS: z.coerce
+    .number()
+    .int()
+    .min(5000)
+    .default(40000),
+  // Lifetime we ask the bot to hold the indicator for. If Jarvis dies
+  // mid-run, the bot stops typing once this lapses.
+  JARVIS_WA_TYPING_TTL_MS: z.coerce.number().int().min(10000).default(120000),
 
   // --- workflows (deterministic scheduled tasks) ---------------------------
   // Default destination chat for workflow notifications. Workflows can

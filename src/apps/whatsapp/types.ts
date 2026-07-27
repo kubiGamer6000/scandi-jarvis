@@ -195,6 +195,16 @@ export interface EditResponse {
   edit_wa_message_id: string;
 }
 
+/** Reply from `POST /v1/chats/:jid/typing`. */
+export interface TypingResponse {
+  jid: string;
+  state: "composing" | "recording";
+  /** ISO timestamp after which the bot stops refreshing the indicator. */
+  expires_at: string;
+  /** The bot's own chatstate refresh cadence, for reference. */
+  refresh_ms: number;
+}
+
 export interface FetchMessagesParams {
   before_seq?: number;
   after_seq?: number;

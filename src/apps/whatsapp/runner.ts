@@ -9,6 +9,7 @@ import type { WhatsappAgent } from "./agent.js";
 import type { WhatsappClient } from "./client.js";
 import { buildContext } from "./context.js";
 import { waitForMessageMedia } from "./media-wait.js";
+import { startTypingIndicator } from "./typing.js";
 import type { MessagePayload } from "./types.js";
 
 const log = createLogger("apps/whatsapp/runner");
@@ -57,6 +58,24 @@ export interface RunOutcome {
  *   - Fallback-final-send when sentMessage=false (Phase 4.23)
  */
 export async function runOnce(opts: RunOptions): Promise<RunOutcome> {
+  // "Typing…" goes up before any work — media-wait and context building can
+  // take a few seconds, and that's already time the user is waiting on us.
+  // The bot drops the indicator as soon as it sends a message to the chat, so
+  // the common path needs no explicit clear; the `finally` covers aborts,
+  // errors, and turns that never send anything.
+  const typing = startTypingIndicator({
+    client: opts.client,
+    chatJid: opts.chatJid,
+    ...(opts.signal ? { signal: opts.signal } : {}),
+  });
+  try {
+    return await executeRun(opts);
+  } finally {
+    await typing.stop();
+  }
+}
+
+async function executeRun(opts: RunOptions): Promise<RunOutcome> {
   const t0 = Date.now();
 
   // If the trigger carries media we want the AI-summary to be in there before

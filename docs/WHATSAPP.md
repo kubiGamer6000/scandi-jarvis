@@ -30,6 +30,7 @@ LangGraph state (`thread_id = chat.jid`) is persisted to Postgres via `PostgresS
 | `src/apps/whatsapp/summaries.ts`                              | Lazy daily / weekly / long-term incremental summarisation (Claude Sonnet 4.6).          |
 | `src/apps/whatsapp/summarize-cron.ts`                         | Standalone worker for proactive summary refresh.                                        |
 | `src/apps/whatsapp/media-wait.ts`                             | Polls bot for media-processing completion before invoking the agent.                    |
+| `src/apps/whatsapp/typing.ts`                                 | Holds the "typing…" indicator open for the lifetime of a run.                            |
 | `src/apps/whatsapp/idempotency.ts`                            | Postgres-backed webhook-ID dedupe with 24h TTL.                                         |
 | `src/apps/whatsapp/commands.ts`                               | Pure slash-command parser (`/stop`).                                                    |
 | `src/apps/whatsapp/whitelist.ts`                              | `JARVIS_WA_ALLOWED_CHATS` matcher.                                                      |
@@ -63,6 +64,9 @@ JARVIS_WA_MEDIA_WAIT_MS=20000
 JARVIS_WA_CONTEXT_MSGS=30
 JARVIS_WA_MAX_SENDS_PER_RUN=12
 JARVIS_WA_MIN_SEND_INTERVAL_MS=500
+JARVIS_WA_TYPING_ENABLED=true
+JARVIS_WA_TYPING_KEEPALIVE_MS=40000
+JARVIS_WA_TYPING_TTL_MS=120000
 
 # Persistence
 SUPABASE_DB_URL=postgres://...
@@ -143,6 +147,14 @@ Idle ──────────▶ Debouncing(5s) ──debounce──▶ Ru
                             send 'I've stopped' + 🛑 react, drain queue,
                             return to Idle)
 ```
+
+Presence during a run:
+
+- **Read receipts** are not our concern — the wa-bot acks every live inbound message on its own, in every DM and group, before the webhook even reaches us. Nothing to configure here; see `docs/API.md` §6.7 in the bot repo if blue ticks aren't showing.
+- **"Typing…"** goes up when a run starts (`runner.ts` → `typing.ts`) and comes down when the run settles, whichever way it ends. We start the indicator before media-wait and context building, because that's already time the user is waiting on us. The bot owns the chatstate refresh cadence; Jarvis just opens the session, re-asserts it every `JARVIS_WA_TYPING_KEEPALIVE_MS` (40s) while the run is in flight, and closes it in a `finally`.
+  - The indicator disappears the moment the bot sends a message, so a reply never lands under a stale "typing…". If the agent keeps working after sending (multi-message turns), the next keepalive re-opens it — which reads like a person typing again.
+  - Sessions carry a `ttl_ms` (`JARVIS_WA_TYPING_TTL_MS`, 2 min), so a crashed or wedged Jarvis can't leave a chat typing indefinitely.
+  - Kill switch: `JARVIS_WA_TYPING_ENABLED=false`.
 
 Notes:
 - All processing for a chat funnels through a per-chat FIFO (`p-queue` with `concurrency: 1`) so we never run two invocations for the same chat at once.
@@ -235,6 +247,9 @@ Outbound actions (`send_message`, `react`, `edit_message`, `send_file`) are wrap
 | Hot loop                                             | Agent reacting to its own messages.                                                                         | Dispatcher loop-protection on `from.jid === self.pn_jid`.     |
 | Summaries stale                                      | Cron not running, or `SUPABASE_DB_URL` unset.                                                               | `npm run wa:summarize-cron` logs, `jarvis.chat_context` rows. |
 | Media missing from context                           | Bot hadn't finished processing before our `JARVIS_WA_MEDIA_WAIT_MS` budget expired.                         | `media-wait.ts`. Increase the env var or check bot health.    |
+| No "typing…" while Jarvis works                      | `JARVIS_WA_TYPING_ENABLED=false`, `TYPING_ENABLED=false` on the bot, or the bot's socket is down (the endpoint 503s). | `typing keepalive failed` at debug level; bot's `/v1/health`. |
+| Chat stuck showing "typing…"                         | Jarvis died mid-run. Self-heals when `JARVIS_WA_TYPING_TTL_MS` lapses on the bot side.                      | `DELETE /v1/chats/:jid/typing` on the bot clears it now.      |
+| Messages never marked read                           | Bot-side setting, not Jarvis: `READ_RECEIPTS_ENABLED`, or read receipts disabled in the WA account's privacy settings (then WhatsApp only sends `read-self`). | Bot logs on connect: `read receipts enabled` / warning.       |
 
 ---
 
