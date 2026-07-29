@@ -46,3 +46,31 @@ export function messageMentionsBot(
   }
   return false;
 }
+
+/**
+ * True if this message is a WhatsApp swipe-reply to one of the bot's messages.
+ *
+ * Used as an implicit address in groups (same gate as @mention): users often
+ * reply to Jarvis without typing @Jarvis. Prefer `quoted.from_me` when the
+ * wa-bot resolved the quoted row; fall back to matching `quoted.from_jid`
+ * against PN/LID (WhatsApp commonly puts the LID on `contextInfo.participant`).
+ */
+export function messageQuotesBot(
+  m: MessagePayload,
+  self: { pnJid: string | null; lidJid: string | null },
+): boolean {
+  const q = m.quoted;
+  if (!q) return false;
+  if (q.from_me === true) return true;
+  if (jidMatches(q.from_jid, self.pnJid)) return true;
+  if (jidMatches(q.from_jid, self.lidJid)) return true;
+  return false;
+}
+
+/** Group-chat admission: explicit @mention or reply-to-bot. */
+export function messageAddressesBot(
+  m: MessagePayload,
+  self: { pnJid: string | null; lidJid: string | null },
+): boolean {
+  return messageMentionsBot(m, self) || messageQuotesBot(m, self);
+}

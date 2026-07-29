@@ -159,7 +159,7 @@ Presence during a run:
 Notes:
 - All processing for a chat funnels through a per-chat FIFO (`p-queue` with `concurrency: 1`) so we never run two invocations for the same chat at once.
 - Loop protection: messages from `self.pn_jid` are dropped before they enter the queue.
-- Group chats: only when the bot is **@-mentioned** — the dispatcher checks `mentioned_self` from the webhook **and** falls back to matching `mentioned_jids` against your PN/LID (with `:device` stripped from multi-device JIDs). If the wa-bot missed a mention due to a JID form mismatch, the fallback still lets the run through.
+- Group chats: only when the bot is **addressed** — either **@-mentioned** (`mentioned_self` / `mentioned_jids` matched against PN/LID, `:device` stripped) **or** a WhatsApp swipe-**reply** to one of the bot's messages (`quoted.from_me` or `quoted.from_jid` matches PN/LID). Plain group chatter without either still drops.
 
 ---
 
@@ -242,7 +242,7 @@ Outbound actions (`send_message`, `react`, `edit_message`, `send_file`) are wrap
 | ---------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
 | Webhook returns 401                                  | HMAC mismatch — wrong `WA_WEBHOOK_SECRET` or proxy modified the body.                                       | `webhook.ts` (`verifySignature`). Inspect `X-Webhook-*` headers. |
 | Same message processed twice                         | `X-Webhook-Id` missing / changing on retry.                                                                 | `idempotency.ts`. Check `jarvis.wa_webhook_seen` table.       |
-| Agent never replies                                  | **Whitelist:** group `…@g.us` not in `JARVIS_WA_ALLOWED_CHATS` and `*` not set. **Groups:** message didn’t actually @mention the bot (`mentioned_self` false and no matching JID in `mentioned_jids`). **Debug:** `LOG_LEVEL=debug` and look for `dropping group msg without @mention` or `dropping non-whitelisted chat`. |
+| Agent never replies                                  | **Whitelist:** group `…@g.us` not in `JARVIS_WA_ALLOWED_CHATS` and `*` not set. **Groups:** message didn’t @mention the bot and isn’t a reply to one of its messages. **Debug:** `LOG_LEVEL=debug` and look for `dropping group msg without @mention or reply-to-bot` or `dropping non-whitelisted chat`. |
 | Agent runs but no message in WA                      | `whatsapp_send_message` not called; safety net should kick in. Check rate-limit middleware (cap exhausted). | `runner.ts` "fallback final send" log, `wa-rate-limit.ts`.    |
 | Hot loop                                             | Agent reacting to its own messages.                                                                         | Dispatcher loop-protection on `from.jid === self.pn_jid`.     |
 | Summaries stale                                      | Cron not running, or `SUPABASE_DB_URL` unset.                                                               | `npm run wa:summarize-cron` logs, `jarvis.chat_context` rows. |

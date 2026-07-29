@@ -159,6 +159,110 @@ assert(
   "no match when someone else is mentioned",
 );
 
+/* ---- group reply-to-bot (implicit address) ---- */
+section("messageQuotesBot / messageAddressesBot");
+const { messageQuotesBot, messageAddressesBot } = await import(
+  "../src/apps/whatsapp/mentions.js"
+);
+assert(
+  messageQuotesBot(
+    baseMsg({
+      chat: groupChat,
+      mentioned_self: false,
+      quoted: {
+        seq: 10,
+        message_id: "BOTMSG",
+        from_jid: "123456789012345@lid",
+        text: "hi",
+        from_me: null,
+      },
+    }),
+    mentionSelf,
+  ),
+  "reply quoting bot LID counts as address",
+);
+assert(
+  messageQuotesBot(
+    baseMsg({
+      chat: groupChat,
+      mentioned_self: false,
+      quoted: {
+        seq: 11,
+        message_id: "BOTMSG2",
+        from_jid: "46701234567:3@s.whatsapp.net",
+        text: "hi",
+        from_me: null,
+      },
+    }),
+    mentionSelf,
+  ),
+  "reply quoting bot PN with :device counts as address",
+);
+assert(
+  messageQuotesBot(
+    baseMsg({
+      chat: groupChat,
+      mentioned_self: false,
+      quoted: {
+        seq: 12,
+        message_id: "BOTMSG3",
+        from_jid: null,
+        text: "hi",
+        from_me: true,
+      },
+    }),
+    mentionSelf,
+  ),
+  "quoted.from_me true counts even without from_jid",
+);
+assert(
+  !messageQuotesBot(
+    baseMsg({
+      chat: groupChat,
+      mentioned_self: false,
+      quoted: {
+        seq: 13,
+        message_id: "OTHER",
+        from_jid: "999999999@s.whatsapp.net",
+        text: "hi",
+        from_me: false,
+      },
+    }),
+    mentionSelf,
+  ),
+  "reply to someone else is not an address",
+);
+assert(
+  messageAddressesBot(
+    baseMsg({
+      chat: groupChat,
+      mentioned_self: false,
+      mentioned_jids: [],
+      quoted: {
+        seq: 14,
+        message_id: "BOTMSG4",
+        from_jid: "46701234567@s.whatsapp.net",
+        text: "?",
+        from_me: true,
+      },
+    }),
+    mentionSelf,
+  ),
+  "messageAddressesBot accepts reply-to-bot without @mention",
+);
+assert(
+  !messageAddressesBot(
+    baseMsg({
+      chat: groupChat,
+      mentioned_self: false,
+      mentioned_jids: [],
+      text: "random group chatter",
+    }),
+    mentionSelf,
+  ),
+  "messageAddressesBot rejects plain group chatter",
+);
+
 /* ---- dispatcher state machine ---- */
 section("Dispatcher state machine");
 const { Dispatcher } = await import("../src/apps/whatsapp/dispatcher.js");

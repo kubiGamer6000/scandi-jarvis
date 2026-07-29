@@ -74,6 +74,8 @@ export interface MessageQuoted {
   message_id: string | null;
   from_jid: string | null;
   text: string | null;
+  /** True when the quoted message was sent by the bot (when known). */
+  from_me?: boolean | null;
 }
 
 export interface MessageReaction {
