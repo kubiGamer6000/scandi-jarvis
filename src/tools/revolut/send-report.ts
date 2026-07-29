@@ -11,6 +11,7 @@ import {
 import {
   type RevolutExpensesClient,
   RevolutExpensesHttpError,
+  RevolutExpensesValidationError,
 } from "./client.js";
 
 const log = createLogger("tools/revolut/send-report");
@@ -153,6 +154,14 @@ export function createRevolutSendReportTool(
           wa_message_id: sent.wa_message_id,
         });
       } catch (err) {
+        if (err instanceof RevolutExpensesValidationError) {
+          log.warn("report validation error", {
+            chat_jid: ctx.chatJid,
+            period: input.period,
+            message: err.message,
+          });
+          return JSON.stringify({ ok: false, error: err.message });
+        }
         if (err instanceof RevolutExpensesHttpError) {
           log.warn("report HTTP error", {
             chat_jid: ctx.chatJid,
@@ -209,20 +218,22 @@ function pickFilename(
 }
 
 function captionFromPeriod(input: SendReportInput): string {
+  // ASCII hyphens only — captions ride through several text paths; keep them
+  // boring so nothing downstream chokes on fancy punctuation.
   switch (input.period) {
     case "today":
-      return "Revolut expenses — today";
+      return "Revolut expenses - today";
     case "yesterday":
-      return "Revolut expenses — yesterday";
+      return "Revolut expenses - yesterday";
     case "this-week":
-      return "Revolut expenses — this week";
+      return "Revolut expenses - this week";
     case "last-week":
-      return "Revolut expenses — last week";
+      return "Revolut expenses - last week";
     case "on":
-      return `Revolut expenses — ${input.date}`;
+      return `Revolut expenses - ${input.date}`;
     case "range":
       return input.to
-        ? `Revolut expenses — ${input.from} to ${input.to}`
-        : `Revolut expenses — from ${input.from}`;
+        ? `Revolut expenses - ${input.from} to ${input.to}`
+        : `Revolut expenses - from ${input.from}`;
   }
 }

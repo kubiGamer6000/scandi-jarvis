@@ -80,7 +80,7 @@ export const revolutDailyExpenses: WorkflowDefinition = {
         file: report.bytes,
         filename,
         mimetype: "text/html",
-        caption: report.periodLabel ?? "Revolut expenses — yesterday",
+        caption: report.periodLabel ?? "Revolut expenses - yesterday",
       },
       { signal: ctx.signal },
     );

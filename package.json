@@ -15,6 +15,7 @@
     "smoke:shopify-skill": "tsx scripts/test-shopify-skill.ts",
     "smoke:wa-client": "tsx scripts/wa-client-smoke.ts",
     "smoke:wa-dispatcher": "tsx scripts/wa-dispatcher-smoke.ts",
+    "smoke:revolut-client": "tsx scripts/revolut-client-smoke.ts",
     "smoke:wa": "tsx scripts/wa-smoke.ts",
     "wa:server": "tsx src/apps/whatsapp/server.ts",
     "wa:server:watch": "tsx watch src/apps/whatsapp/server.ts",

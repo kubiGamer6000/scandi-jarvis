@@ -6,6 +6,7 @@ import { createLogger } from "../../core/logger.js";
 import {
   type RevolutExpensesClient,
   RevolutExpensesHttpError,
+  RevolutExpensesValidationError,
 } from "./client.js";
 
 const log = createLogger("tools/revolut/get-data");
@@ -115,6 +116,13 @@ export function createRevolutGetDataTool(reports: RevolutExpensesClient) {
           report: parsed,
         });
       } catch (err) {
+        if (err instanceof RevolutExpensesValidationError) {
+          log.warn("get-data validation error", {
+            period: input.period,
+            message: err.message,
+          });
+          return JSON.stringify({ ok: false, error: err.message });
+        }
         if (err instanceof RevolutExpensesHttpError) {
           log.warn("get-data HTTP error", {
             status: err.status,

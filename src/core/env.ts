@@ -14,7 +14,12 @@ const EnvSchema = z.object({
   // --- model ---------------------------------------------------------------
   ANTHROPIC_API_KEY: z.string().optional(),
   JARVIS_MODEL: z.string().min(1).default("anthropic:claude-opus-4-6"),
-  JARVIS_TEMPERATURE: z.coerce.number().min(0).max(2).default(0),
+  // Optional. Newer Claude models (Opus 4.7+ / Sonnet 5+) reject non-default
+  // sampling params with HTTP 400 — leave unset to omit temperature entirely.
+  JARVIS_TEMPERATURE: z.preprocess(
+    (v) => (v === "" || v === undefined || v === null ? undefined : v),
+    z.coerce.number().min(0).max(2).optional(),
+  ),
 
   // --- tools ---------------------------------------------------------------
   TAVILY_API_KEY: z.string().optional(),
