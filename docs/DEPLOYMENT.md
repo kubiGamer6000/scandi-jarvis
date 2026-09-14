@@ -17,8 +17,10 @@ What runs in a single Node process (`dist/apps/whatsapp/server.js`):
 - Per-chat dispatcher state machine (debounce → run → optional
   hard-interrupt + restart) backed by an in-memory `p-queue`
 - The shared `jarvis-whatsapp` DeepAgent (Anthropic + Composio +
-  sandboxed `execute` shell), checkpointed per chat to `langgraph.*`
-  tables in Supabase via `PostgresSaver`
+  sandboxed `execute` shell), checkpointed per chat session
+  (`thread_id = <chat-jid>#<start>`) to `langgraph.*` tables in
+  Supabase via `PostgresSaver`
+- Background summary refresh once a chat goes quiet after a run
 - The local sandbox: each `execute` call is a short-lived `bwrap`
   child process (bubblewrap) inside the same systemd unit, with its
   workspace under `/opt/scandi-jarvis/.sandbox/`
@@ -328,9 +330,10 @@ sudo prompt.
 
 ## 4. Optional: summary-cron sidecar
 
-The agent itself refreshes summaries lazily on each run, but for
-chats that go quiet for a while (or get a sudden burst) you can run
-the proactive worker on a systemd timer.
+The server already refreshes a chat's summaries in the background a
+couple of minutes after its last run (never inline before a reply),
+but you can also run the proactive worker on a systemd timer to keep
+every enabled chat warm.
 
 ### 4.1 Service unit
 
@@ -824,14 +827,18 @@ Per request:
 ```
 INFO  apps/whatsapp/webhook accepted {"id":"…","event":"message.received","chat_jid":"…"}
 INFO  apps/whatsapp/dispatcher run started {"chat_jid":"…","triggering_seq":378}
-INFO  apps/whatsapp/runner invoke {"chat_jid":"…","chat_type":"dm","triggering_seq":378,…}
+INFO  apps/whatsapp/runner invoke {"chat_jid":"…","chat_type":"dm","triggering_seq":378,"mode":"delta",…,"thread_id":"…#mf3k2a1b","session_run":3,"prep_ms":180}
 INFO  core/tool-trace tool → whatsapp_react {"chat_jid":"…","input":"{\"emoji\":\"⏳\"}"}
 INFO  core/tool-trace tool ← whatsapp_react {"chat_jid":"…","output":"{\"ok\":true,…}","ms":312}
 INFO  core/tool-trace tool → SHOPIFY_GRAPH_QL_QUERY {"chat_jid":"…","input":"{\"query\":\"…\"}"}
 INFO  core/tool-trace tool ← SHOPIFY_GRAPH_QL_QUERY {"chat_jid":"…","output":"…","ms":1421}
 INFO  tools/whatsapp/send-message sent message {"chat_jid":"…","seq":380,"chars":712}
-INFO  apps/whatsapp/runner run complete {"chat_jid":"…","ok":true,"aborted":false,"sent_message":true,…,"duration_ms":47794}
+INFO  apps/whatsapp/runner run complete {"chat_jid":"…","ok":true,"aborted":false,"sent_message":true,…,"usage":{"model_calls":2,"input_tokens":…,"output_tokens":…,"cache_read_tokens":…,"cache_write_tokens":…},"duration_ms":4812}
 ```
+
+`usage` counts only this run's model calls. For what reply time is made
+of and how to read these fields, see
+[WHATSAPP.md §6.3](./WHATSAPP.md#63-latency).
 
 The `core/tool-trace` lines come from every tool call the agent
 makes — including subagents (Shopify, etc.) and Composio tools that
@@ -848,11 +855,11 @@ don't log on their own. See `src/core/tool-trace.ts`.
 | `preflight: WA bot health failed` while the bot is clearly up                                      | `WA_BOT_TOKEN` doesn't match the bot's `API_AUTH_TOKEN` (trailing newline / whitespace).                          | Re-copy with `cat /opt/scandi-wa-bot/.env`; `chmod 600` on `/opt/scandi-jarvis/.env`.                                          |
 | Bot delivers but Jarvis returns 401 / 403 on `/wa-webhook`                                         | `WA_WEBHOOK_SECRET` mismatch between Jarvis's `.env` and the subscription's `secret`.                              | Re-`PATCH /v1/webhooks/<id>` with the right `secret`, or roll a new one and update both.                                       |
 | `400 querystring/after_seq must be >= 1`                                                           | Old build that paged messages with `after_seq=0` on first-summary runs. Fixed; redeploy.                            | `jarvis deploy`.                                                                                                               |
-| `400 A maximum of 4 blocks with cache_control may be provided`                                     | DeepAgents' auto Anthropic prompt-caching middleware exceeding Anthropic's cap. Already disabled in the runner.   | `jarvis deploy` if you're on an old build; otherwise see `src/apps/whatsapp/runner.ts` (`enableCaching: false`).               |
+| `400 A maximum of 4 blocks with cache_control may be provided`                                     | Too many `cache_control` markers in one request. Prompt caching is enabled (DeepAgents' middleware: system prompt + last message), which stays under the cap on its own. | Look for extra `cache_control` markers added by custom middleware or the context block (`context.ts`) and remove them.          |
 | Agent runs, replies are sent, but the user sees nothing                                            | `JARVIS_WA_ALLOWED_CHATS` doesn't include the chat's JID. The dispatcher silently drops disallowed chats.          | Add the JID (use `*` for fully open) and `jarvis restart`.                                                                     |
 | `whatsapp_send_file` returns `File '…' not found` instantly                                        | The WA file tools are using a different backend from `write_file` / `execute`.                                     | Already fixed in `src/apps/whatsapp/agent.ts` (passes the shared sandbox). Redeploy.                                           |
 | Agent reports the wrong local time                                                                 | Old build that defaulted to UTC and let the agent do TZ math.                                                      | `jarvis deploy`. Current tool defaults to `Europe/Stockholm` and returns `tz_abbrev`/`utc_offset` so there's no math to do.    |
-| `MemoryMax=1500M` killed the service mid-run                                                       | Long conversation + big sandboxed tool output blew the cap.                                                        | Edit the unit, bump to `2G`, `daemon-reload`, restart. Long-term: tighten `JARVIS_WA_CONTEXT_MSGS` or `summarizationMiddleware`. |
+| `MemoryMax=1500M` killed the service mid-run                                                       | Long session + big sandboxed tool output blew the cap.                                                             | Edit the unit, bump to `2G`, `daemon-reload`, restart. Long-term: tighten `JARVIS_WA_CONTEXT_MSGS` or `summarizationMiddleware`. |
 | `bubblewrap self-test failed … setting up uid map: Permission denied` in the journal                | AppArmor profile for `bwrap` missing, so Ubuntu blocks its user namespaces.                                        | `sudo bash scripts/setup-sandbox.sh` (§3.2b), then `jarvis restart`.                                                           |
 | `No sandbox provider could be started` in the journal                                              | Same as above, or `bubblewrap` not installed.                                                                      | `sudo bash scripts/setup-sandbox.sh` (§3.2b), then `jarvis restart`. Confirm with `npm run smoke:sandbox`.                     |
 | Sandboxed script fails with `ModuleNotFoundError` (Python)                                         | Toolchain not built, or the package isn't in `PY_PACKAGES`.                                                        | Rerun `sudo -u scandi npm run setup:sandbox`; for a new package add it to `PY_PACKAGES` in `scripts/setup-sandbox.sh` first.   |
@@ -874,12 +881,16 @@ SELECT chat_jid, length(daily_summary), length(weekly_summary), length(longterm_
  WHERE chat_jid = '<chat-jid>';
 
 -- "Show me the last few LangGraph checkpoints for this chat."
+-- Threads are per session: '<chat-jid>#<base36 start time>'.
 SELECT thread_id, checkpoint_id, parent_checkpoint_id
   FROM langgraph.checkpoints
- WHERE thread_id = '<chat-jid>'
+ WHERE thread_id LIKE '<chat-jid>#%'
  ORDER BY checkpoint_id DESC
  LIMIT 5;
 ```
+
+Rows with `thread_id = '<chat-jid>'` (no `#`) are from older builds
+that used one unbounded thread per chat; nothing reads them any more.
 
 ---
 
@@ -892,20 +903,24 @@ lives in Supabase:
 | ----------------------------------- | ----------------------------------------------------------- | ---------------------------------- |
 | Chat summaries + notes              | `jarvis.chat_context`                                       | Supabase daily snapshot            |
 | Webhook idempotency                 | `jarvis.wa_webhook_seen` (24h TTL — disposable)             | (no backup needed)                 |
-| LangGraph checkpoints (per chat)    | `langgraph.checkpoints`                                     | Supabase daily snapshot            |
+| LangGraph checkpoints (per session) | `langgraph.checkpoints`                                     | Supabase daily snapshot            |
 | `.env` (incl. any Deno token)       | `/opt/scandi-jarvis/.env`                                   | **You** — password manager copy.   |
 | Sandbox workspace + toolchain       | `/opt/scandi-jarvis/.sandbox/`                              | (scratch — rebuild with §3.2b)     |
 
-If a chat's checkpoint table grows unwieldy, you can wipe per-thread
-state without losing summaries/notes:
+If a chat's checkpoint rows grow unwieldy, you can wipe its thread
+state without losing summaries/notes (this also matches the legacy
+bare-jid thread from older builds):
 
 ```sql
-DELETE FROM langgraph.checkpoints      WHERE thread_id = '<chat-jid>';
-DELETE FROM langgraph.checkpoint_writes WHERE thread_id = '<chat-jid>';
+DELETE FROM langgraph.checkpoints       WHERE thread_id = '<chat-jid>' OR thread_id LIKE '<chat-jid>#%';
+DELETE FROM langgraph.checkpoint_writes WHERE thread_id = '<chat-jid>' OR thread_id LIKE '<chat-jid>#%';
 ```
 
-Next run for that chat rebuilds context from `jarvis.chat_context` +
-the bot's REST API + a fresh checkpoint thread.
+Sessions are tracked in memory, so if the chat has a live session,
+`jarvis restart` afterwards — otherwise its next runs keep sending
+deltas into the now-empty thread until the session rotates. After
+that, the next run rebuilds full context from `jarvis.chat_context` +
+the bot's REST API in a fresh thread.
 
 ---
 

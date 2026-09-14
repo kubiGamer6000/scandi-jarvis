@@ -2,7 +2,7 @@
 
 Jarvis is the in-house AI agent harness for **Scandi Gum**. It's a TypeScript project built on [LangChain](https://docs.langchain.com/oss/javascript/langchain/) and [LangGraph](https://docs.langchain.com/oss/javascript/langgraph/) using the [DeepAgents](https://docs.langchain.com/oss/javascript/deepagents/overview) harness, designed to grow into a fleet of specialised agents that help us run the business: pulling data from Shopify and Meta Ads, generating reports, automating expense tracking, and so on.
 
-The current default model is **Claude Opus 4.6** (`anthropic:claude-opus-4-6`).
+The current default model is **Claude Opus 5** (`anthropic:claude-opus-5`), overridable via `JARVIS_MODEL`.
 
 ## Quickstart
 
@@ -78,5 +78,6 @@ frontends/         reserved for future React/visualization apps (own packages)
 | `npm run smoke`         | Build every registered agent (no LLM call)                             |
 | `npm run test:tools`    | Functional check of the standalone custom tools                        |
 | `npm run composio:list` | List the Composio tools wired into a toolkit (default: `SHOPIFY`)      |
+| `npm run bench:wa`      | WhatsApp reply-latency benchmark (real LLM calls, stubbed bot)         |
 | `npm run typecheck`     | `tsc --noEmit` over the whole project                                  |
 | `npm run build`         | Compile to `dist/`                                                     |

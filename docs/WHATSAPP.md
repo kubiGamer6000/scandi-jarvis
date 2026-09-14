@@ -11,10 +11,10 @@ A Fastify HTTP server (`src/apps/whatsapp/`) that:
 1. Receives webhooks from [`scandi-wa-bot`](https://github.com/scandi-gum/scandi-wa-bot).
 2. Verifies HMAC, deduplicates, and trigger-filters them.
 3. Dispatches each chat's messages through a per-chat state machine (debounce → run → optional hard-interrupt + restart).
-4. Builds a fresh context block (chat header + summaries + chat notes + last 30 transcript msgs + triggering message) and invokes the shared `jarvis` DeepAgent.
+4. Builds a context block (full on a session's first run: chat header + summaries + chat notes + last 30 transcript msgs + triggering message; a delta of new messages on later runs) and invokes the shared `jarvis` DeepAgent.
 5. Lets the agent reply via WhatsApp tools (`whatsapp_send_message`, `whatsapp_react`, `whatsapp_pull_file`, …) that hit the bot's REST API.
 
-LangGraph state (`thread_id = chat.jid`) is persisted to Postgres via `PostgresSaver` — todos, scratch files, and intermediate reasoning survive across runs.
+LangGraph state is persisted to Postgres via `PostgresSaver`, per **session** (`thread_id = <chat_jid>#<base36 start time>`, see §6.1) — todos, scratch files, and intermediate reasoning survive across the runs of a session.
 
 ---
 
@@ -26,8 +26,9 @@ LangGraph state (`thread_id = chat.jid`) is persisted to Postgres via `PostgresS
 | `src/apps/whatsapp/webhook.ts`                                | Raw-body parsing, HMAC verify, idempotency check, parse `WebhookEnvelope`, dispatch.    |
 | `src/apps/whatsapp/dispatcher.ts`                             | Per-chat state machine: debounce, run, hard-interrupt, `/stop`, loop-protection.        |
 | `src/apps/whatsapp/runner.ts`                                 | Single-shot agent invocation: assemble context, invoke, capture outcome, fallback send. |
-| `src/apps/whatsapp/context.ts`                                | Builds the `HumanMessage` (with Anthropic `cache_control` on the static prefix).        |
-| `src/apps/whatsapp/summaries.ts`                              | Lazy daily / weekly / long-term incremental summarisation (Claude Sonnet 4.6).          |
+| `src/apps/whatsapp/context.ts`                                | Builds the per-run `HumanMessage` (full context or session delta).                       |
+| `src/apps/whatsapp/sessions.ts`                               | In-memory per-chat agent sessions (thread id, idle / max-runs rotation, seen-seq).      |
+| `src/apps/whatsapp/summaries.ts`                              | Background daily / weekly / long-term incremental summarisation (Claude Sonnet 5).      |
 | `src/apps/whatsapp/summarize-cron.ts`                         | Standalone worker for proactive summary refresh.                                        |
 | `src/apps/whatsapp/media-wait.ts`                             | Polls bot for media-processing completion before invoking the agent.                    |
 | `src/apps/whatsapp/typing.ts`                                 | Holds the "typing…" indicator open for the lifetime of a run.                            |
@@ -59,8 +60,10 @@ JARVIS_WA_PORT=8088
 JARVIS_WA_ALLOWED_CHATS=120363xxx@g.us,49xxx@s.whatsapp.net
 
 # Tuning (defaults shown)
-JARVIS_WA_DEBOUNCE_MS=5000
-JARVIS_WA_MEDIA_WAIT_MS=20000
+JARVIS_WA_DEBOUNCE_MS=2500
+JARVIS_WA_SESSION_IDLE_MIN=45
+JARVIS_WA_SESSION_MAX_RUNS=15
+JARVIS_WA_MEDIA_WAIT_MS=60000
 JARVIS_WA_CONTEXT_MSGS=30
 JARVIS_WA_MAX_SENDS_PER_RUN=12
 JARVIS_WA_MIN_SEND_INTERVAL_MS=500
@@ -71,9 +74,16 @@ JARVIS_WA_TYPING_TTL_MS=120000
 # Persistence
 SUPABASE_DB_URL=postgres://...
 
-# Summaries
-JARVIS_SUMMARY_MODEL=anthropic:claude-sonnet-4-6
+# Model (see §6.3 Latency)
 ANTHROPIC_API_KEY=sk-ant-...
+JARVIS_MODEL=anthropic:claude-opus-5
+# JARVIS_EFFORT=            # unset = API default (high)
+JARVIS_FAST_MODE=false
+JARVIS_REFUSAL_FALLBACK=true
+
+# Summaries
+JARVIS_SUMMARY_MODEL=anthropic:claude-sonnet-5
+JARVIS_SUMMARY_IDLE_MS=120000
 ```
 
 `SUPABASE_DB_URL`, `WA_BOT_BASE_URL`, `WA_BOT_TOKEN`, and `WA_WEBHOOK_SECRET` are mandatory — `server.ts` will refuse to start without them.
@@ -121,9 +131,9 @@ Configure the WA bot to POST to `https://<host>/wa-webhook` with `X-Webhook-Sign
 npm run wa:summarize-cron
 ```
 
-Runs hourly by default. Refreshes daily summaries for any chat with new messages, and weekly summaries when the daily-through watermark advances past the weekly one. Long-term summaries roll forward when weekly does.
+Runs hourly by default. Applies the same refresh policy as the server's background refresh (§7) to the daily and weekly summaries of every enabled chat in `jarvis.chat_context`.
 
-Deploy as a sidecar / cron job alongside the webhook server.
+Optional: the webhook server already refreshes summaries in the background after runs. Deploy as a sidecar / cron job alongside it if you want quiet chats kept warm too.
 
 ---
 
@@ -133,7 +143,7 @@ Each chat owns a small machine driven by `dispatcher.ts`:
 
 ```
         new msg                          new msg
-Idle ──────────▶ Debouncing(5s) ──debounce──▶ Running ──finish──▶ Idle
+Idle ──────────▶ Debouncing(2.5s) ─debounce─▶ Running ──finish──▶ Idle
                       │  │                     │
                       │  └── new msg: reset    │ new msg: abort + react 🔄
                       │     debounce           │             │
@@ -165,7 +175,7 @@ Notes:
 
 ## 6. Context block (what the agent sees)
 
-For each run we build a single `HumanMessage` containing:
+For each run we build a single `HumanMessage`. On the **first run of a session** (§6.1) it contains:
 
 - chat header (`chat_jid`, `chat_type`, `chat_subject`, `participants`, `now`, `triggering_seq`)
 - long-term summary (older than this week)
@@ -176,9 +186,64 @@ For each run we build a single `HumanMessage` containing:
 - the triggering message
 - "## What to do" instructions
 
-Everything except the agent's tool calls and intermediate reasoning is **rebuilt fresh from Postgres + the bot's REST API on every run** — the WA history is never copied into LangGraph state. This keeps context bounded and avoids drift.
+On **later runs of the same session** the thread already holds all of that, so the block is a delta: chat header, only the messages that arrived since the previous run (with a note pointing at `whatsapp_fetch_messages` if more arrived than the 30-message window), the triggering message, and a one-line "What to do". No summaries or notes.
 
-> Note on prompt caching: an earlier draft split this into two content blocks with `cache_control: { type: "ephemeral" }` on the static prefix, but Anthropic limits a single request to 4 cache breakpoints total and DeepAgents already places markers on the system prompt / tools / skills middleware. Adding ours pushed us to 5 and the API rejected runs with a 400. Caching is now handled upstream only.
+The trigger, recent transcript and `jarvis.chat_context` row are fetched concurrently. Summaries are read as-is — they're never refreshed on the reply path (§7). The WA history is rebuilt from Postgres + the bot's REST API rather than trusted from LangGraph state; the thread only carries what the agent saw and did during the current session.
+
+### 6.1 Sessions
+
+A chat's runs share one LangGraph thread, `thread_id = <chat_jid>#<base36 session start time>` (`sessions.ts`), so the model keeps its own tool results and reasoning between turns and the prompt cache serves the whole prefix. A session ends — and the next run starts a fresh thread with the full context block — when:
+
+- the chat has been idle for `JARVIS_WA_SESSION_IDLE_MIN` (45) minutes,
+- the session has served `JARVIS_WA_SESSION_MAX_RUNS` (15) runs,
+- a run fails (errored, non-aborted), or
+- the process restarts (sessions are in-memory only).
+
+Aborted runs (hard-interrupt) don't advance the session's seen-seq watermark, so the restart re-renders those messages.
+
+Why bounded: previously every chat used one thread (`thread_id = chat_jid`) forever. Those grew to ~250K tokens (a DM) and ~590K tokens (the ops group) and were re-sent on every model call. Long-lived memory belongs in summaries and notes. Old bare-jid threads are no longer read.
+
+### 6.2 Prompt caching
+
+On. DeepAgents' Anthropic caching middleware puts a breakpoint on the system prompt and an automatic one on the last message (5-minute TTL). Because a session thread is append-only, every model call after the first reads the system prompt, tools and earlier turns from cache — ~99% cache reads on follow-up turns in benchmarks. We don't add our own `cache_control` markers to the context block (Anthropic caps a request at 4; see the troubleshooting row in DEPLOYMENT.md).
+
+### 6.3 Latency
+
+What a reply costs, in order:
+
+1. **Debounce** — `JARVIS_WA_DEBOUNCE_MS` (2500) of quiet after the last inbound message.
+2. **Prep** — media-wait on the trigger (only if it has unprocessed media, up to `JARVIS_WA_MEDIA_WAIT_MS`) + concurrent context fetches. Logged as `prep_ms` on the `invoke` line.
+3. **Model calls** — first call (thinking + first tool call) until the first `whatsapp_send_message` / `whatsapp_react`, then any follow-up calls. Dominated by output tokens and effort; input size matters far less with caching on.
+
+Nothing else runs inline: summaries refresh in the background after the run (§7). For reference, a simple DM reply used to take ~54s (5s debounce, ~38s of three sequential summary LLM calls before the agent, ~6.5s first model call over an uncached, unbounded thread).
+
+Knobs:
+
+| Env                                   | Default                     | Effect                                                                                                       |
+| ------------------------------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `JARVIS_MODEL`                        | `anthropic:claude-opus-5`   | Adaptive thinking on by default, 16K max output.                                                              |
+| `JARVIS_EFFORT`                       | unset (= API `high`)        | `low` / `medium` / `high` / `xhigh` / `max`. Lower is faster and cheaper on routine turns.                   |
+| `JARVIS_FAST_MODE`                    | `false`                     | Opus 5 / 4.8 fast mode (faster output, premium pricing). Needs fast-mode rate limits on the org — ours currently has 0, so leave off. |
+| `JARVIS_REFUSAL_FALLBACK`             | `true`                      | Opus 5 / Fable: a refusal is retried server-side on a fallback model (`fallbacks: "default"`) instead of ending the turn. |
+| `JARVIS_WA_DEBOUNCE_MS`               | `2500`                      | Coalescing window vs. time-to-start.                                                                          |
+| `JARVIS_WA_SESSION_IDLE_MIN` / `JARVIS_WA_SESSION_MAX_RUNS` | `45` / `15` | How long a thread (and its cache) is reused before starting fresh.                                     |
+| `JARVIS_SUMMARY_IDLE_MS`              | `120000`                    | Quiet period after a run before the background summary refresh.                                               |
+
+Reading the logs — the runner's `invoke` line carries `thread_id`, `session_run` (1 = fresh session, full context) and `prep_ms`; `run complete` carries `duration_ms` and `usage`, summed over **this run's** model calls only:
+
+```
+usage: {"model_calls":2,"input_tokens":…,"output_tokens":…,"cache_read_tokens":…,"cache_write_tokens":…}
+```
+
+On `session_run > 1`, `cache_read_tokens` should be most of the input; `cache_write_tokens` close to the whole input on a continuing run means the cache missed (e.g. more than 5 minutes passed since the previous turn). High `output_tokens` with few `model_calls` points at thinking depth — try a lower `JARVIS_EFFORT`.
+
+Benchmark: `npm run bench:wa` (`scripts/bench-wa-latency.ts`) drives a 3-turn scripted DM through the real runner with real LLM calls against a stubbed wa-bot and prints time to first visible action, total run time, and input / cache-read tokens per turn. Costs real tokens. Pick configs with `BENCH_CONFIGS` (`opus4.6`, `opus5`, `opus5-medium`, `opus5-low`, `opus5-fast`; default `opus4.6,opus5,opus5-medium,opus5-fast`):
+
+```bash
+BENCH_CONFIGS=opus5,opus5-low npm run bench:wa
+```
+
+Measured on this architecture: Opus 5 first visible reply 2.8–3.9s, 3.9–5.1s total per turn; Opus 4.6 4.1–6.4s / 6.6–8.2s.
 
 ---
 
@@ -186,13 +251,17 @@ Everything except the agent's tool calls and intermediate reasoning is **rebuilt
 
 Three rolling summaries, each watermarked by a `*_through_seq` column on `jarvis.chat_context`:
 
-| Summary    | Window               | Refresh trigger                                                           |
+| Summary    | Window               | Refresh when (since its `*_through_seq` watermark)                        |
 | ---------- | -------------------- | ------------------------------------------------------------------------- |
-| `daily`    | last ~24h            | new messages since `daily_through_seq` (lazy on read, eager via cron).    |
-| `weekly`   | last ~7d             | `daily_through_seq` advanced past `weekly_through_seq` + threshold.       |
-| `longterm` | everything older     | weekly rollover (the previous weekly is folded into long-term).           |
+| `daily`    | last ~24h            | ≥ 15 new messages, or older than 3h and any new message.                  |
+| `weekly`   | last ~7d             | ≥ 60 new messages, or older than 24h and any new message.                 |
+| `longterm` | everything older     | ≥ 300 new messages, or older than 7d and any new message.                 |
 
-Each pass is **incremental**: we send the prior summary + the new chunk to Sonnet 4.6 with an "update this summary, keep names and unresolved threads" prompt. Token ceilings on each output prevent unbounded growth.
+Summaries **never run on the reply path.** After each non-aborted run the runner calls `scheduleSummaryRefresh(chat)`, which waits until the chat has been quiet for `JARVIS_SUMMARY_IDLE_MS` (2 min; each run resets the timer) and then refreshes daily / weekly / long-term concurrently. At most one refresh per chat runs at a time. The hourly cron (§4) still exists for quiet chats.
+
+Staleness is measured by fetching this chat's messages past the watermark (seqs are global across chats, so seq arithmetic doesn't work): a small probe of `minNewMessages` first, the full window only if the summary is due. Watermarks never move backwards, so a slower concurrent refresh can't clobber a newer one.
+
+Each pass is **incremental**: we send the prior summary + the new chunk to `JARVIS_SUMMARY_MODEL` (default Sonnet 5) with an "update this summary, keep names and unresolved threads" prompt. Token ceilings on each output prevent unbounded growth.
 
 ---
 
@@ -211,17 +280,19 @@ All defined in `src/tools/whatsapp/`:
 | `whatsapp_get_message`      | Look up a single message by `seq` (used to inspect quotes).                        |
 | `whatsapp_remember`         | Persist a note into `jarvis.chat_context.notes` (appended or named-section replace). |
 
-Outbound actions (`send_message`, `react`, `edit_message`, `send_file`) are wrapped by `createWhatsappRateLimitMiddleware` (`src/core/wa-rate-limit.ts`):
+Outbound actions (`send_message`, `react`, `edit_message`, `send_file`, plus `revolut_send_expense_report`) are wrapped by `createWhatsappRateLimitMiddleware` (`src/core/wa-rate-limit.ts`):
 - hard cap: `JARVIS_WA_MAX_SENDS_PER_RUN` outbound calls per agent run
 - min spacing: `JARVIS_WA_MIN_SEND_INTERVAL_MS` between calls
+
+A "run" is keyed on `thread_id` + triggering seq. (Earlier builds keyed on the tool-call id, which is unique per call, so the caps never applied.)
 
 ---
 
 ## 9. Safety nets
 
-- **Fallback final send.** If the agent finishes a normal (non-aborted, non-errored) run and never called `whatsapp_send_message` but produced a substantive final `AIMessage`, the runner sends that text to the chat as a fallback and logs a warning. (`p4-fallback-send`)
+- **Fallback final send.** If the agent finishes a normal (non-aborted, non-errored) run and never called `whatsapp_send_message` but produced a substantive final `AIMessage`, the runner sends that text to the chat as a fallback and logs a warning. Only this run's messages are inspected (everything after its input message), not earlier runs in the session thread. (`p4-fallback-send`)
 - **LangSmith tagging.** Every run is tagged `frontend:whatsapp`, `chat_type:*`, `chat_jid:*`, optionally `from_pn:*`, plus metadata for `triggering_seq`, transcript size, summary presence, sender info. (`p4-tracing`)
-- **Prompt caching.** Handled entirely by DeepAgents' upstream middleware on the system prompt / tools / skills. We do *not* add our own `cache_control` markers on the run context — see the note in §6 above. (`p4-prompt-cache`)
+- **Prompt caching.** DeepAgents' Anthropic caching middleware, enabled. We do *not* add our own `cache_control` markers on the run context — see §6.2. (`p4-prompt-cache`)
 - **Webhook dedupe.** `X-Webhook-Id` is recorded in `jarvis.wa_webhook_seen` with a 24h TTL; replays are no-ops.
 - **HMAC verify.** Constant-time compare of `X-Webhook-Signature` against `HMAC-SHA256(raw_body, WA_WEBHOOK_SECRET)`. Tolerance window on `X-Webhook-Timestamp` rejects stale replays.
 
@@ -245,7 +316,8 @@ Outbound actions (`send_message`, `react`, `edit_message`, `send_file`) are wrap
 | Agent never replies                                  | **Whitelist:** group `…@g.us` not in `JARVIS_WA_ALLOWED_CHATS` and `*` not set. **Groups:** message didn’t @mention the bot and isn’t a reply to one of its messages. **Debug:** `LOG_LEVEL=debug` and look for `dropping group msg without @mention or reply-to-bot` or `dropping non-whitelisted chat`. |
 | Agent runs but no message in WA                      | `whatsapp_send_message` not called; safety net should kick in. Check rate-limit middleware (cap exhausted). | `runner.ts` "fallback final send" log, `wa-rate-limit.ts`.    |
 | Hot loop                                             | Agent reacting to its own messages.                                                                         | Dispatcher loop-protection on `from.jid === self.pn_jid`.     |
-| Summaries stale                                      | Cron not running, or `SUPABASE_DB_URL` unset.                                                               | `npm run wa:summarize-cron` logs, `jarvis.chat_context` rows. |
+| Summaries stale                                      | Expected up to the §7 thresholds. Otherwise `SUPABASE_DB_URL` unset, or the refresh is failing.            | `background summary refresh failed` / `llm update failed` logs, `jarvis.chat_context` rows. |
+| Replies slow                                         | See §6.3. Compare `prep_ms`, `duration_ms` and `usage` on the runner log lines.                            | `npm run bench:wa` to separate model latency from chat/infra. |
 | Media missing from context                           | Bot hadn't finished processing before our `JARVIS_WA_MEDIA_WAIT_MS` budget expired.                         | `media-wait.ts`. Increase the env var or check bot health.    |
 | No "typing…" while Jarvis works                      | `JARVIS_WA_TYPING_ENABLED=false`, `TYPING_ENABLED=false` on the bot, or the bot's socket is down (the endpoint 503s). | `typing keepalive failed` at debug level; bot's `/v1/health`. |
 | Chat stuck showing "typing…"                         | Jarvis died mid-run. Self-heals when `JARVIS_WA_TYPING_TTL_MS` lapses on the bot side.                      | `DELETE /v1/chats/:jid/typing` on the bot clears it now.      |
@@ -256,7 +328,7 @@ Outbound actions (`send_message`, `react`, `edit_message`, `send_file`) are wrap
 ## 12. Add / change a WhatsApp-aware capability
 
 1. **New WA tool**: drop a file in `src/tools/whatsapp/<name>.ts` that exports a factory `(client, opts) => StructuredTool`. Add it to `createWhatsappTools` in `src/tools/whatsapp/index.ts`. If it does outbound WA actions, add its name to the list `createWhatsappRateLimitMiddleware` wraps (`src/core/wa-rate-limit.ts`).
-2. **New summary kind**: extend the column set in `db/migrations/00x_*.sql` (alongside `daily/weekly/longterm`) and add a `refresh*IfStale` in `summaries.ts`. Wire it into `context.ts`.
+2. **New summary kind**: extend the column set in `db/migrations/00x_*.sql` (alongside `daily/weekly/longterm`) and add a `refresh*IfStale` in `summaries.ts`. Add it to `refreshAllIfStale` (background refresh) and render it in `context.ts` (full-context block only).
 3. **Tighter / looser tuning knob**: thread an env var through `src/core/env.ts` first, never read `process.env` directly elsewhere.
 
 For non-WA capabilities (regular tools, subagents, skills), use the patterns described in [DEVELOPMENT.md](./DEVELOPMENT.md). The WA frontend is just another `apps/` entrypoint — the agent itself is the same Jarvis.

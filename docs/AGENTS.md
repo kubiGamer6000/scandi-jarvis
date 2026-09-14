@@ -6,7 +6,7 @@ This is the living inventory of every agent in the project. Keep it short — on
 
 | Key      | Source                                        | Model (default)             | Tools                                                                | Subagents                            | Skill sets         | Purpose                                                                                                            |
 | -------- | --------------------------------------------- | --------------------------- | -------------------------------------------------------------------- | ------------------------------------ | ------------------ | ------------------------------------------------------------------------------------------------------------------ |
-| `jarvis` | [`src/agents/jarvis/`](../src/agents/jarvis/) | `anthropic:claude-opus-4-6` | local: `getCurrentDatetime`, `calculator`, `internetSearch`, `tavilyDeepResearch`          | `shopify-agent`, `general-purpose`\* | `jarvis`           | General-purpose Scandi Gum operations assistant — plans, researches, calculates, drafts. Delegates Shopify work. Skills include docx tooling under `skills/jarvis/docx/`.   |
+| `jarvis` | [`src/agents/jarvis/`](../src/agents/jarvis/) | `anthropic:claude-opus-5`   | local: `getCurrentDatetime`, `calculator`, `internetSearch`, `tavilyDeepResearch`          | `shopify-agent`, `general-purpose`\* | `jarvis`           | General-purpose Scandi Gum operations assistant — plans, researches, calculates, drafts. Delegates Shopify work. Skills include docx tooling under `skills/jarvis/docx/`.   |
 
 \* `general-purpose` is auto-attached by the DeepAgents harness.
 
@@ -37,11 +37,11 @@ tsx src/apps/cli.ts jarvis # equivalent
 
 ### Run an agent over WhatsApp
 
-The same `jarvis` agent is exposed over WhatsApp via a Fastify webhook server. Each chat gets its own `thread_id`, and the agent talks to the chat using WA-aware tools (`whatsapp_send_message`, `whatsapp_react`, `whatsapp_pull_file`, `whatsapp_send_file`, `whatsapp_fetch_messages`, `whatsapp_get_message`, `whatsapp_remember`, `whatsapp_edit_message`).
+The same `jarvis` agent is exposed over WhatsApp via a Fastify webhook server. Each chat's runs share a session `thread_id` (`<chat_jid>#<start>`, rotated after 45 idle minutes or 15 runs), and the agent talks to the chat using WA-aware tools (`whatsapp_send_message`, `whatsapp_react`, `whatsapp_pull_file`, `whatsapp_send_file`, `whatsapp_fetch_messages`, `whatsapp_get_message`, `whatsapp_remember`, `whatsapp_edit_message`).
 
 ```bash
 npm run wa:server               # webhook + agent loop
-npm run wa:summarize-cron       # hourly rolling-summary refresh worker
+npm run wa:summarize-cron       # optional hourly rolling-summary refresh worker
 ```
 
 See [WHATSAPP.md](./WHATSAPP.md) for the full operational guide and [WHATSAPP_PLAN.md](./WHATSAPP_PLAN.md) for the design history.

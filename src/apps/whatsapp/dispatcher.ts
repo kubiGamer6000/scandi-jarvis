@@ -74,7 +74,7 @@ interface ChatRecord {
  * Per-chat dispatcher implementing the full Phase-2 state machine:
  *   debounce → hard-interrupt + auto-restart → /stop final-stop.
  *
- * - 5s debounce per chat: coalesces rapid-fire messages into one run.
+ * - Debounce per chat (`JARVIS_WA_DEBOUNCE_MS`): coalesces rapid-fire messages into one run.
  * - new non-/stop message during a run aborts it, reacts 🔄 on the new
  *   message, then restarts with fresh context (latest msg as trigger).
  * - /stop intercepts before the agent sees it: aborts, reacts 🛑, sends

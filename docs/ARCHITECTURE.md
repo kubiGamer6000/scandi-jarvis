@@ -46,7 +46,7 @@ src/agents/jarvis/
 
 `build()` calls `buildAgent(definition)` from `core/agent.ts`, which:
 
-1. Resolves the model (default: `anthropic:claude-opus-4-6`, configurable via `JARVIS_MODEL`).
+1. Resolves the model via `core/models.ts` (default: `anthropic:claude-opus-5`, configurable via `JARVIS_MODEL`; Anthropic options `JARVIS_EFFORT`, `JARVIS_FAST_MODE`, `JARVIS_REFUSAL_FALLBACK`).
 2. Loads any declared Composio tools (no-op if `COMPOSIO_API_KEY` is unset) and merges them with the local tools.
 3. Resolves each subagent (its own tools, composio config, model, skill paths).
 4. Picks a backend (see [Backends below](#backends-filesystem-and-shell)) and, when the sandbox is enabled, attaches a `beforeAgent` middleware that mirrors `./skills/` into the sandbox.
@@ -108,12 +108,12 @@ The `frontends/` directory at the repo root is reserved for future visualization
 The primary user-facing frontend today is **WhatsApp**, served by a Fastify webhook listener and an hourly summary-refresh worker. It uses the *same* `jarvis` agent the CLI uses, but composes it with:
 
 - a small set of WA-aware tools (see [`src/tools/whatsapp/`](../src/tools/whatsapp/))
-- a per-run `HumanMessage` context block built from chat header + rolling summaries + chat notes + the last 30 transcript messages + the triggering message (the WA history is **never** stored in LangGraph state — it's rebuilt fresh each turn)
+- a per-run `HumanMessage` context block: on a session's first run, chat header + rolling summaries + chat notes + the last 30 transcript messages + the triggering message; on later runs, only the messages since the previous run
 - a per-chat state machine (debounce → run → optional hard-interrupt + restart, plus `/stop`) so that bursty user input doesn't spawn parallel runs
-- `thread_id = chat.jid` against a `PostgresSaver` checkpointer for durable per-chat todos / scratch files / intermediate reasoning
+- bounded per-chat **sessions**: runs share `thread_id = <chat_jid>#<start time>` against a `PostgresSaver` checkpointer until the chat is idle 45 min or after 15 runs, keeping every model call small and prompt-cached
 - a `wrapToolCall` middleware that bounds outbound WhatsApp calls per run
 
-A separate Postgres schema (`jarvis.chat_context`, `jarvis.wa_webhook_seen`) holds the rolling daily / weekly / long-term summaries, chat notes (`whatsapp_remember`), and webhook idempotency keys. Summaries refresh lazily on read and proactively from a standalone cron worker.
+A separate Postgres schema (`jarvis.chat_context`, `jarvis.wa_webhook_seen`) holds the rolling daily / weekly / long-term summaries, chat notes (`whatsapp_remember`), and webhook idempotency keys. Summaries refresh in the background once a chat goes quiet after a run (never on the reply path), plus an optional hourly cron worker.
 
 Full operational guide: [WHATSAPP.md](./WHATSAPP.md). Design history: [WHATSAPP_PLAN.md](./WHATSAPP_PLAN.md).
 

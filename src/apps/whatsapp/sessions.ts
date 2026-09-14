@@ -70,8 +70,3 @@ export function completeSessionRun(
   session.lastRunAt = Date.now();
   session.lastSeenSeq = Math.max(session.lastSeenSeq, result.lastSeenSeq);
 }
-
-/** Drop a chat's session (e.g. after `/stop` or `whatsapp_remember`). */
-export function endSession(chatJid: string): void {
-  sessions.delete(chatJid);
-}

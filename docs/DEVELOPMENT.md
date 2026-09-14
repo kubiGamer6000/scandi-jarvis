@@ -297,13 +297,14 @@ npm run wa:server
 npm run smoke:wa-client         # checks /v1/health + /v1/me
 npm run smoke:wa-dispatcher     # pure-logic state-machine assertions
 npm run smoke:wa                # end-to-end: signed webhook → bot sees a reply
+npm run bench:wa                # reply latency per model config (real LLM calls, stubbed bot)
 ```
 
 The `smoke:wa` script is deployable as a healthcheck — point it at the live `wa:server` and bot, and it will POST a canned trigger and assert that an agent reply lands on the bot within `JARVIS_WA_SMOKE_TIMEOUT_MS` (default 90s). See the script header for the full set of `JARVIS_WA_SMOKE_*` env vars.
 
 ### Summary cron worker
 
-Daily / weekly summaries are refreshed lazily by the runner when they're stale, but a separate worker keeps them warm so user-facing runs rarely pay the cost:
+`wa:server` refreshes a chat's summaries in the background once the chat has been quiet for `JARVIS_SUMMARY_IDLE_MS` after a run (never on the reply path — see [`docs/WHATSAPP.md`](./WHATSAPP.md) §7). A separate worker can additionally sweep every enabled chat:
 
 ```bash
 # One-shot (deploy via cron / systemd timer hourly):

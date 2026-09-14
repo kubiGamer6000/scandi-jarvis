@@ -1,7 +1,8 @@
 /**
- * Stand-alone cron worker that proactively refreshes daily summaries for
- * chats with recent activity so the user-facing runner rarely pays the
- * synchronous summary cost.
+ * Stand-alone cron worker that refreshes daily / weekly summaries for known
+ * chats. The WhatsApp server already refreshes summaries in the background
+ * after conversations go quiet; this is a safety net for chats nobody has
+ * written to since the last server restart.
  *
  * Usage:
  *   npm run wa:summarize-cron            # one-shot pass and exit (cron-friendly)
