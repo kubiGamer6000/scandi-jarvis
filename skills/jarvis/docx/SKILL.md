@@ -14,7 +14,7 @@ A .docx file is a ZIP archive containing XML files.
 
 A valid `.docx` is **binary**. The agent must **never** put a `.docx` through `write_file` using text copied from `read_file`, tool output, or anything line-numbered — that UTF-8 re-encodes bytes, inserts U+FFFD, and can inject extra newline / line-number / tab text when pipelines mis-handle byte `0x0A` (ZIP local headers use `0x0A` as part of binary fields, not as a real newline). The result opens as corrupt in Word.
 
-**Correct:** build the file only inside the sandbox with `execute` (Node `docx` + `Packer.toBuffer`, or `python scripts/office/pack.py`, etc.) so the path holds **raw bytes**; then call `whatsapp_send_file` on that path. For files received from WhatsApp, use `whatsapp_pull_file` (stores binary as base64) and decode in the sandbox — do not paste into `write_file`.
+**Correct:** build the file only inside the sandbox with `execute` (Node `docx` + `Packer.toBuffer`, or `python scripts/office/pack.py`, etc.) so the path holds **raw bytes**; then call `whatsapp_send_file` on that path. For files received from WhatsApp, use `whatsapp_pull_file` (writes the raw bytes into the sandbox) and work on that path directly — do not paste into `write_file`.
 
 ## Quick Reference
 
@@ -591,7 +591,7 @@ After running `comment.py` (see Step 2), add markers to document.xml. For replie
 ## Dependencies
 
 - **pandoc**: Text extraction
-- **docx**: `npm install docx` in a project dir (or global in the sandbox); `require('docx')` must resolve when running Node
-- **validate.py**: Python 3 with **`defusedxml`** (`python3 -m pip install defusedxml` — use `python3 -m pip` if `pip` is not on `PATH` in the sandbox)
+- **docx**: preinstalled in the sandbox toolchain (`NODE_PATH` is set), so `require('docx')` resolves from any directory
+- **validate.py**: Python 3 with **`defusedxml`** (preinstalled in the sandbox venv)
 - **LibreOffice**: PDF conversion (auto-configured for sandboxed environments via `scripts/office/soffice.py`)
 - **Poppler**: `pdftoppm` for images

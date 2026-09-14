@@ -33,10 +33,29 @@ const EnvSchema = z.object({
   COMPOSIO_USER_ID: z.string().min(1).default("default"),
 
   // --- sandbox -------------------------------------------------------------
+  // Which sandbox backs the agent's `execute` tool (see core/sandbox.ts):
+  //   local = bubblewrap-isolated shell on this host (default, free)
+  //   deno  = Deno Deploy sandbox, falling back to local when unavailable
+  //   none  = no shell at all
+  JARVIS_SANDBOX_PROVIDER: z.enum(["local", "deno", "none"]).default("local"),
+  // Host directory for the local sandbox (workspace, scratch, toolchain).
+  // Relative paths resolve against the process cwd.
+  JARVIS_SANDBOX_DIR: z.string().min(1).default(".sandbox"),
+  // Wall-clock limit per `execute` call on the local sandbox.
+  JARVIS_SANDBOX_EXEC_TIMEOUT_SEC: z.coerce.number().int().min(5).default(300),
+  // Cap on command output returned to the agent.
+  JARVIS_SANDBOX_MAX_OUTPUT_BYTES: z.coerce.number().int().min(1000).default(60_000),
+  // Max size of any single file a sandboxed command may write.
+  JARVIS_SANDBOX_MAX_FILE_MB: z.coerce.number().int().min(1).default(512),
+  // Allow outbound network from inside the local sandbox (pip, curl, APIs).
+  JARVIS_SANDBOX_NETWORK: z
+    .union([z.literal("true"), z.literal("false")])
+    .default("true"),
+  // Max commands running at once in the local sandbox.
+  JARVIS_SANDBOX_MAX_CONCURRENCY: z.coerce.number().int().min(1).default(2),
+
   // Deno Deploy organization/personal token (https://app.deno.com → Settings).
-  // When set, every agent gets a `DenoSandbox` as its default backend, which
-  // adds the `execute` tool (shell access) and lets skill scripts run inside
-  // the sandbox. When unset, agents fall back to the no-shell setup.
+  // Only used when JARVIS_SANDBOX_PROVIDER=deno.
   DENO_DEPLOY_TOKEN: z.string().optional(),
   // Optional Deno Deploy organisation slug (only required for personal tokens
   // starting with `ddp_`; org tokens starting with `ddo_` carry the org).

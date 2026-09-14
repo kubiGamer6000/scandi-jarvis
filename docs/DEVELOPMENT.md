@@ -171,7 +171,7 @@ skills/
         └── references/      syntax-reference.md, data-model.md, recipes.md, ...
 ```
 
-A `SKILL.md` follows the [Agent Skills spec](https://agentskills.io/specification): YAML frontmatter (`name`, `description`, ...) followed by Markdown instructions. Scripts can be any runtime available in the sandbox VM — Node (`*.mjs`), bash, Python, etc. Binary asset files (`.gz`, `.png`, ...) are uploaded byte-perfect via the skills-sync middleware (the wrapper SDK's text-only upload path is bypassed for known binary extensions; see `src/core/skills-sync.ts`).
+A `SKILL.md` follows the [Agent Skills spec](https://agentskills.io/specification): YAML frontmatter (`name`, `description`, ...) followed by Markdown instructions. Scripts can be any runtime available in the sandbox — Node (`*.mjs`), bash, Python, etc. (on the local sandbox, the preinstalled Python packages and node modules come from `scripts/setup-sandbox.sh`). All skill files, including binary assets (`.gz`, `.png`, ...), are copied byte-for-byte by the skills-sync middleware (see `src/core/skills-sync.ts`).
 
 **Wire-up.** Opt an agent or subagent in via `skillSets`:
 
@@ -191,33 +191,71 @@ export const shopifySubagent: SubAgentDefinition = {
 
 `buildAgent` mounts the on-disk `skills/` folder at the agent's virtual path `/home/app/skills/` (via `FilesystemBackend(virtualMode: true)`). The agent sees skills at paths like `/home/app/skills/shopify/<skill>/SKILL.md`.
 
-**Why `/home/app/skills/` and not `/skills/`?** When the sandbox is enabled (see below), the Deno SDK only accepts `uploadFiles` to writable areas under `/home/app/...` or `/tmp/...` — top-level `/skills/...` errors with `is_directory`. We use the same prefix in non-sandbox mode for consistency, so authoring is identical regardless of how the agent runs.
+**Why `/home/app/skills/` and not `/skills/`?** When the sandbox is enabled (see below), files can only be uploaded to the writable areas `/home/app/...` and `/tmp/...` — that holds for both the local and the Deno provider. We use the same prefix in non-sandbox mode for consistency, so authoring is identical regardless of how the agent runs.
 
 **Isolation.** Custom subagents do **not** inherit the parent's skill sets; they get only what they declare. The auto-attached `general-purpose` subagent does inherit the parent's skill sets.
 
 ## Sandbox (shell + executable skills)
 
-By default agents have **no shell access**. Set `DENO_DEPLOY_TOKEN` in `.env` and every agent automatically gets:
+Agents get the `execute` shell tool from a sandbox. Which one is picked by `JARVIS_SANDBOX_PROVIDER`:
 
-- a [Deno microVM sandbox](https://docs.langchain.com/oss/javascript/integrations/providers/deno) as its default filesystem backend, which adds the `execute` tool
-- a `beforeAgent` middleware that uploads every file under `./skills/` into `/home/app/skills/...` in the sandbox, so an agent can `bash /home/app/skills/foo/run.sh` (or `python ...py`) on a script that ships with a skill
+| Provider          | What it is                                                                                                      |
+| ----------------- | --------------------------------------------------------------------------------------------------------------- |
+| `local` (default) | Every `execute` runs under [bubblewrap](https://github.com/containers/bubblewrap) (`bwrap`) on this machine. Free, no network hop. |
+| `deno`            | A [Deno Deploy sandbox](https://docs.langchain.com/oss/javascript/integrations/providers/deno) (paid), with automatic failover to `local`. |
+| `none`            | No sandbox — no shell, no script execution. Agents run on `StateBackend`.                                       |
 
-**Get a token.** [app.deno.com](https://app.deno.com) → Settings → Organization Tokens. Use an org token (`ddo_...`); personal tokens (`ddp_...`) additionally require `DENO_DEPLOY_ORG`.
+`DENO_DEPLOY_TOKEN` doesn't enable anything on its own; it's only read when the provider is `deno`.
 
-**Lifecycle.** One sandbox is provisioned per Node process (`getSandbox()` is a lazy singleton in [`src/core/sandbox.ts`](../src/core/sandbox.ts)) and shared across all agents and subagents in that process. The CLI calls `closeSandbox()` on exit; `SIGINT` / `SIGTERM` / `beforeExit` handlers do best-effort cleanup. For `langgraph dev`, the sandbox lives as long as the dev server. Configure idle behaviour:
+With a sandbox, every agent automatically gets:
 
-| Env var                  | Default     | Notes                                                                 |
-| ------------------------ | ----------- | --------------------------------------------------------------------- |
-| `DENO_DEPLOY_TOKEN`      | _(unset)_   | Required to enable the sandbox. Unset = no shell, no script execution.|
-| `DENO_DEPLOY_ORG`        | _(unset)_   | Only required for personal (`ddp_`) tokens.                           |
-| `JARVIS_SANDBOX_TIMEOUT` | `session`   | `"session"` = closes when this process disconnects. Or `"20m"`, `"1h"` for hard idle TTL. |
-| `JARVIS_SANDBOX_MEMORY`  | `1GiB`      | Min 768MiB, max 4GiB on Deno.                                         |
+- the sandbox as its default filesystem backend, which adds the `execute` tool
+- a `beforeAgent` middleware that copies every file under `./skills/` into `/home/app/skills/...` in the sandbox, so an agent can `bash /home/app/skills/foo/run.sh` (or `python ...py`) on a script that ships with a skill. The copy is skipped when nothing under `./skills/` changed (paths + sizes + mtimes) since the last sync to the same provider.
 
-**Verify it works.** With the token set:
+**Local setup.** The local provider needs bubblewrap and a prebuilt toolchain. On Ubuntu 24.04:
 
 ```bash
-npm run smoke:sandbox         # provisions a sandbox, syncs ./skills/ into it,
-                              # runs a temporary skill script, and tears down
+sudo bash scripts/setup-sandbox.sh   # apt packages, AppArmor profile for bwrap, toolchain
+npm run setup:sandbox                # (re)build only the toolchain, no sudo
+```
+
+The script installs `bubblewrap`, `python3-venv`, `poppler-utils`, `qpdf`, `pandoc`, `tesseract-ocr` (LibreOffice with `WITH_LIBREOFFICE=1`), adds `/etc/apparmor.d/bwrap` so `/usr/bin/bwrap` may create user namespaces (Ubuntu 24.04 sets `kernel.apparmor_restrict_unprivileged_userns=1`), and builds a Python venv + `node_modules` (`docx`) under `<JARVIS_SANDBOX_DIR>/tools`. To add a Python package, append it to `PY_PACKAGES` in the script and rerun it.
+
+**What the local sandbox looks like.** Each command gets fresh user/pid/ipc/uts/cgroup namespaces (network is shared unless `JARVIS_SANDBOX_NETWORK=false`) and this filesystem:
+
+| Inside the sandbox | Host                              | Access                                   |
+| ------------------ | --------------------------------- | ---------------------------------------- |
+| `/usr`, `/etc`     | host                              | read-only                                |
+| `/home/app`        | `<JARVIS_SANDBOX_DIR>/home`       | read-write, persistent                   |
+| `/tmp`             | `<JARVIS_SANDBOX_DIR>/tmp`        | read-write, wiped when the process starts |
+| `<dir>/tools`      | `<JARVIS_SANDBOX_DIR>/tools`      | read-only (venv + node_modules)          |
+
+It can't see `/opt` (so not the repo or `.env`), host processes, or any Jarvis env var. A command that hits the timeout has its whole process tree killed (exit code `124`); output is capped, single-file size is limited (`ulimit -f`), and sandboxed processes get `oom_score_adj=1000` so a runaway command is OOM-killed before the Jarvis server. `uploadFiles` / `downloadFiles` run host-side with raw bytes, only under `/home/app` and `/tmp`, and refuse to follow symlinks out of those dirs.
+
+**Deno provider.** [app.deno.com](https://app.deno.com) → Settings → Organization Tokens. Use an org token (`ddo_...`); personal tokens (`ddp_...`) additionally require `DENO_DEPLOY_ORG`. If Deno can't be provisioned, or its connection dies and can't be re-established, Jarvis falls back to `local` and tries Deno again after a 15-minute cooldown (at the start of a run, never mid-run). File transfer uses the Deno SDK's binary-safe `fs` API.
+
+**Lifecycle.** One `JarvisSandbox` (extends deepagents' `BaseSandbox`) is created per Node process (`getSandbox()` in [`src/core/sandbox.ts`](../src/core/sandbox.ts)) and shared across all agents and subagents in that process. It's a stable object that swaps providers underneath, so a re-provisioned or failed-over sandbox never leaves an agent holding a dead handle. Entrypoints call `closeSandbox()` on exit. If no provider can start, `getSandbox()` logs `No sandbox provider could be started` and agents run without `execute`.
+
+| Env var                           | Default     | Notes                                                                 |
+| --------------------------------- | ----------- | --------------------------------------------------------------------- |
+| `JARVIS_SANDBOX_PROVIDER`         | `local`     | `local` \| `deno` \| `none`.                                          |
+| `JARVIS_SANDBOX_DIR`              | `.sandbox`  | Local sandbox state (`home/`, `tmp/`, `tools/`). Relative to cwd.     |
+| `JARVIS_SANDBOX_EXEC_TIMEOUT_SEC` | `300`       | Per-command wall-clock limit (local). Min 5.                          |
+| `JARVIS_SANDBOX_MAX_OUTPUT_BYTES` | `60000`     | Output returned to the agent is truncated beyond this (local).        |
+| `JARVIS_SANDBOX_MAX_FILE_MB`      | `512`       | Max size of any single file a command writes (local).                 |
+| `JARVIS_SANDBOX_NETWORK`          | `true`      | Outbound network from inside the local sandbox.                       |
+| `JARVIS_SANDBOX_MAX_CONCURRENCY`  | `2`         | Local commands running at once; the rest queue.                       |
+| `DENO_DEPLOY_TOKEN`               | _(unset)_   | `deno` provider only.                                                 |
+| `DENO_DEPLOY_ORG`                 | _(unset)_   | Only required for personal (`ddp_`) tokens.                           |
+| `JARVIS_SANDBOX_TIMEOUT`          | `session`   | Deno only. `"session"` = closes when this process disconnects. Or `"20m"`, `"1h"` for hard idle TTL. |
+| `JARVIS_SANDBOX_MEMORY`           | `1GiB`      | Deno only. Min 768MiB, max 4GiB.                                      |
+
+**Verify it works.**
+
+```bash
+npm run smoke:sandbox         # against the configured provider: execution, binary
+                              # round-trip, skills sync, and (local) isolation checks
+JARVIS_SANDBOX_EXEC_TIMEOUT_SEC=5 npm run smoke:sandbox   # also tests timeouts
 
 npm run smoke:shopify-skill   # provisions + runs shopify-admin's
                               # search_docs.mjs and validate.mjs end-to-end
@@ -225,7 +263,13 @@ npm run smoke:shopify-skill   # provisions + runs shopify-admin's
 
 **Subagents inherit the sandbox.** The harness reuses the parent's backend, so once jarvis has a sandbox, the shopify subagent (and any future subagent) automatically gets the same `execute` tool and the same `/home/app/skills/...` mount.
 
-**Cost notes.** Sandbox provisioning is a paid Deno Deploy operation. Provision happens lazily on the first `buildAgent` call, then is reused — keep `DENO_DEPLOY_TOKEN` unset during pure-text iteration to avoid spinning one up.
+**Binary files.** `whatsapp_pull_file` writes the downloaded media into the sandbox as raw bytes (`encoding: "raw"`), and `whatsapp_send_file` reads through `downloadFiles`, so `.pdf` / `.docx` / images round-trip intact. Without a sandbox, `whatsapp_pull_file` stores binaries base64-encoded in state.
+
+**Known limits.**
+
+- **One shared workspace.** `/home/app` is shared by every chat and thread in the process — files written during one chat's run are visible to runs in another.
+- **Network is on by default.** Sandboxed code can reach the internet and services on the host's localhost (though it doesn't have the tokens they need). Set `JARVIS_SANDBOX_NETWORK=false` to cut it off.
+- **Symlink race.** File transfer checks for symlinks before writing; a same-uid race between that check and the write is theoretically possible but requires concurrent `execute` calls.
 
 ## Add a new entrypoint (server, cron, Slack bot, …)
 

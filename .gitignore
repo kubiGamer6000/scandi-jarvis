@@ -30,6 +30,9 @@ pnpm-debug.log*
 # Test coverage
 coverage/
 
+# Local sandbox workspace + toolchain (scripts/setup-sandbox.sh)
+.sandbox/
+
 # Misc
 .cache/
 .tmp/

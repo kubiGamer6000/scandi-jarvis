@@ -1,8 +1,8 @@
 import type { AnyBackendProtocol } from "deepagents";
-import type { DenoSandbox } from "@langchain/deno";
 import type { StructuredTool } from "@langchain/core/tools";
 
 import type { WhatsappClient } from "../../apps/whatsapp/client.js";
+import type { JarvisSandbox } from "../../core/sandbox.js";
 
 import { createEditMessageTool } from "./edit-message.js";
 import { createFetchMessagesTool } from "./fetch-messages.js";
@@ -17,25 +17,16 @@ export { WhatsappContextSchema, type WhatsappContext } from "./runtime-context.j
 
 export interface CreateWhatsappToolsOptions {
   /**
-   * Optional backend override for `pull-file` / `send-file`. Defaults to
-   * a `StateBackend` (writes to LangGraph state), which works for any agent.
-   *
-   * Pass the agent's actual backend (e.g. a Deno sandbox) here if you want
-   * pulled files to land in the sandbox FS so the agent can `execute` against
-   * them. The WA app wires this when a sandbox is configured.
+   * Virtual-FS backend for `pull-file` / `send-file` when there is no
+   * sandbox. Defaults to a `StateBackend` (files live in LangGraph state).
    */
   backend?: AnyBackendProtocol;
   /**
-   * Optional Deno sandbox resolver. When set, `send-file` reads bytes via
-   * `sandbox.instance.fs.readFile` (binary-safe). Without this, sending any
-   * binary file the agent wrote inside the sandbox (.docx, .pdf, .zip…) gets
-   * corrupted by the wrapper SDK's UTF-8 `cat` round-trip.
-   *
-   * Pass a *callable* (not the resolved instance) so the tool can re-fetch
-   * a fresh, health-probed handle each run — long-lived WA servers routinely
-   * outlive their underlying Deno sandbox.
+   * The agent's sandbox. When set, `pull-file` writes and `send-file` reads
+   * raw bytes there, so files are shared with `write_file` / `execute` and
+   * binaries round-trip intact.
    */
-  getSandbox?: (opts?: { force?: boolean }) => Promise<DenoSandbox | null>;
+  sandbox?: JarvisSandbox;
 }
 
 /**
@@ -49,19 +40,16 @@ export function createWhatsappTools(
   client: WhatsappClient,
   options: CreateWhatsappToolsOptions = {},
 ): StructuredTool[] {
-  const fileOpts = options.backend !== undefined ? { backend: options.backend } : {};
-  const sendOpts = {
-    ...fileOpts,
-    ...(options.getSandbox !== undefined
-      ? { getSandbox: options.getSandbox }
-      : {}),
+  const fileOpts = {
+    ...(options.backend !== undefined ? { backend: options.backend } : {}),
+    ...(options.sandbox !== undefined ? { sandbox: options.sandbox } : {}),
   };
   return [
     createSendMessageTool(client),
     createReactTool(client),
     createEditMessageTool(client),
     createPullFileTool(client, fileOpts),
-    createSendFileTool(client, sendOpts),
+    createSendFileTool(client, fileOpts),
     createFetchMessagesTool(client),
     createGetMessageTool(client),
     createRememberTool(),

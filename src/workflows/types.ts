@@ -38,7 +38,7 @@ export interface WorkflowDefinition {
   /** One-line human description (shown by `npm run workflow list`). */
   description: string;
   /**
-   * Whether this workflow needs the Deno sandbox (e.g. for spawning shell
+   * Whether this workflow needs the sandbox (e.g. for spawning shell
    * commands). Most don't — defaults to false. The runner skips sandbox
    * provisioning entirely when no workflow needs it.
    */

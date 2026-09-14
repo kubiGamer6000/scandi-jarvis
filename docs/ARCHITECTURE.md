@@ -49,7 +49,7 @@ src/agents/jarvis/
 1. Resolves the model (default: `anthropic:claude-opus-4-6`, configurable via `JARVIS_MODEL`).
 2. Loads any declared Composio tools (no-op if `COMPOSIO_API_KEY` is unset) and merges them with the local tools.
 3. Resolves each subagent (its own tools, composio config, model, skill paths).
-4. Picks a backend (see [Backends below](#backends-filesystem-and-shell)) and, when the sandbox is enabled, attaches a `beforeAgent` middleware that mirrors `./skills/` into the sandbox VM.
+4. Picks a backend (see [Backends below](#backends-filesystem-and-shell)) and, when the sandbox is enabled, attaches a `beforeAgent` middleware that mirrors `./skills/` into the sandbox.
 5. Calls `createDeepAgent({ name, model, tools, systemPrompt, subagents, backend, middleware, skills, checkpointer })`.
 6. Returns the compiled LangGraph agent — so callers can use `.invoke`, `.stream`, etc.
 
@@ -71,16 +71,18 @@ See [`docs/DEVELOPMENT.md#skills`](./DEVELOPMENT.md#skills) for the layout and a
 
 `buildAgent` picks one of three backend topologies based on whether a sandbox is configured and whether any agent declared skill sets:
 
-| `DENO_DEPLOY_TOKEN` | Skills declared? | Default backend | `/home/app/skills/` mounted at | `execute` (shell) tool |
+| Sandbox available?  | Skills declared? | Default backend | `/home/app/skills/` mounted at | `execute` (shell) tool |
 | ------------------- | ---------------- | --------------- | ------------------------------ | ---------------------- |
-| set                 | yes              | `DenoSandbox`   | `FilesystemBackend(./skills)`  | ✓                      |
-| set                 | no               | `DenoSandbox`   | —                              | ✓                      |
-| unset               | yes              | `StateBackend`  | `FilesystemBackend(./skills)`  | —                      |
-| unset               | no               | `StateBackend` (DeepAgents default) | — | — |
+| yes                 | yes              | `JarvisSandbox` | `FilesystemBackend(./skills)`  | ✓                      |
+| yes                 | no               | `JarvisSandbox` | —                              | ✓                      |
+| no                  | yes              | `StateBackend`  | `FilesystemBackend(./skills)`  | —                      |
+| no                  | no               | `StateBackend` (DeepAgents default) | — | — |
 
-When a sandbox is in play, a process-singleton `DenoSandbox` (see [`src/core/sandbox.ts`](../src/core/sandbox.ts)) is provisioned lazily on the first `buildAgent` call and shared across every agent and subagent in that Node process. A `beforeAgent` middleware (see [`src/core/skills-sync.ts`](../src/core/skills-sync.ts)) mirrors every file under `./skills/` into `/home/app/skills/...` in the VM before each invocation, so scripts shipped with a skill can be executed via `execute` at the same path the agent reads them from.
+"Sandbox available" means `JARVIS_SANDBOX_PROVIDER` is `local` (default) or `deno` **and** a provider actually started; with `none`, or if startup fails, agents degrade to `StateBackend`.
 
-Detailed lifecycle, env vars, and cost notes: [`docs/DEVELOPMENT.md#sandbox-shell--executable-skills`](./DEVELOPMENT.md#sandbox-shell--executable-skills).
+`JarvisSandbox` (see [`src/core/sandbox.ts`](../src/core/sandbox.ts)) is a process-singleton that extends deepagents' `BaseSandbox`, started on the first `buildAgent` call and shared across every agent and subagent in that Node process. It forwards `execute` / `uploadFiles` / `downloadFiles` to the live provider — a bubblewrap-isolated shell on the host ([`sandbox-local.ts`](../src/core/sandbox-local.ts)) or a Deno Deploy sandbox that fails over to local ([`sandbox-deno.ts`](../src/core/sandbox-deno.ts)) — and swaps providers underneath without the agent noticing. A `beforeAgent` middleware (see [`src/core/skills-sync.ts`](../src/core/skills-sync.ts)) health-checks the sandbox and mirrors `./skills/` into `/home/app/skills/...` before each invocation (skipped when unchanged), so scripts shipped with a skill can be executed via `execute` at the same path the agent reads them from.
+
+Detailed providers, isolation, lifecycle and env vars: [`docs/DEVELOPMENT.md#sandbox-shell--executable-skills`](./DEVELOPMENT.md#sandbox-shell--executable-skills).
 
 ## Tools and the registry
 
@@ -95,7 +97,7 @@ LangGraph state (messages, todos, virtual files) is **per `thread_id`** with our
 Two important wrinkles when the sandbox is enabled:
 
 - **Skill files** live on host disk under `./skills/` and are **shared globally** — every thread, every agent, every subagent sees the same files.
-- **Sandbox VM filesystem** (anything the agent writes via `write_file("/scratch/...")` etc.) is **per Node process, not per thread**. The sandbox is a singleton, so files written in thread A are visible to thread B until the process restarts. Namespace by `thread_id` in paths if you need isolation.
+- **Sandbox filesystem** (anything the agent writes via `write_file("/home/app/...")`, `execute`, etc.) is **per process, not per thread**. The sandbox is a singleton, so files written in thread A (e.g. one WhatsApp chat) are visible to thread B. On the local provider `/home/app` also survives restarts (only `/tmp` is wiped on start). Namespace by `thread_id` in paths if you need isolation.
 
 ## Frontends
 

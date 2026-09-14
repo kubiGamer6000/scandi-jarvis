@@ -45,7 +45,7 @@ function preflightChecks(): void {
   }
   if (!isSandboxConfigured()) {
     console.warn(
-      "⚠️   DENO_DEPLOY_TOKEN not set – the agent has no `execute` (shell) tool, and skill scripts will be readable but not runnable.",
+      "⚠️   JARVIS_SANDBOX_PROVIDER=none – the agent has no `execute` (shell) tool, and skill scripts will be readable but not runnable.",
     );
   }
 }

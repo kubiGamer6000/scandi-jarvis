@@ -6,11 +6,10 @@ import {
   resolveBackend,
 } from "deepagents";
 import { tool, type ToolRuntime } from "langchain";
-import type { DenoSandbox } from "@langchain/deno";
 import { z } from "zod";
 
 import { createLogger } from "../../core/logger.js";
-import { isSandboxClosedError } from "../../core/sandbox.js";
+import type { JarvisSandbox } from "../../core/sandbox.js";
 import type { WhatsappClient } from "../../apps/whatsapp/client.js";
 
 import { readWhatsappContext, type WhatsappContext } from "./runtime-context.js";
@@ -76,53 +75,14 @@ function detectKindAndMime(
 }
 
 export interface CreateSendFileToolOptions {
-  /** Optional virtual-FS backend used for state-only / non-sandbox paths. */
+  /** Virtual-FS backend used when there is no sandbox (state-only agents). */
   backend?: AnyBackendProtocol;
   /**
-   * Resolver for the current (healthy) Deno sandbox. When provided, send-file
-   * reads bytes directly via `sandbox.instance.fs.readFile` (binary-safe RPC)
-   * instead of going through the deepagents/Deno wrapper's `cat`-based
-   * `downloadFiles`, which UTF-8 decodes stdout and **destroys binary bytes**
-   * (every non-UTF-8 byte becomes `0xef 0xbf 0xbd` — U+FFFD). That's why
-   * `.docx` / `.pdf` files generated inside the sandbox come out unopenable.
-   *
-   * The resolver is called per-invocation (not captured at build time) so a
-   * stale/closed sandbox is replaced automatically. Pass `getSandbox` from
-   * `core/sandbox.ts` — it health-probes the cache and re-provisions on need.
+   * The agent's sandbox. When set, bytes are read with `downloadFiles`, which
+   * is binary-safe — anything the agent built with `execute` (.docx, .pdf,
+   * .zip, images) is sent exactly as written.
    */
-  getSandbox?: (opts?: { force?: boolean }) => Promise<DenoSandbox | null>;
-}
-
-/**
- * Try to read a file from the Deno sandbox's filesystem byte-for-byte.
- *
- * Returns the bytes, `null` for "not in this sandbox" (caller falls back to
- * `backend.read()`), or `{ closed: true }` when the connection died mid-read
- * so the caller can re-provision and retry.
- */
-async function readFromSandbox(
-  sandbox: DenoSandbox | null,
-  path: string,
-  signal: AbortSignal | undefined,
-): Promise<{ bytes: Buffer } | { closed: true } | null> {
-  if (!sandbox || !sandbox.isRunning) return null;
-  try {
-    const data = await sandbox.instance.fs.readFile(
-      path,
-      signal ? { signal } : undefined,
-    );
-    return { bytes: Buffer.from(data) };
-  } catch (err) {
-    if (isSandboxClosedError(err)) {
-      return { closed: true };
-    }
-    const message = err instanceof Error ? err.message : String(err);
-    log.debug("sandbox.fs.readFile miss; will fall back to backend.read()", {
-      path,
-      error: message,
-    });
-    return null;
-  }
+  sandbox?: Pick<JarvisSandbox, "downloadFiles">;
 }
 
 export function createSendFileTool(
@@ -130,7 +90,7 @@ export function createSendFileTool(
   options: CreateSendFileToolOptions = {},
 ) {
   const backend = options.backend ?? new StateBackend();
-  const getSandbox = options.getSandbox;
+  const sandbox = options.sandbox;
 
   return tool(
     async (
@@ -147,49 +107,17 @@ export function createSendFileTool(
 
       let bytes: Buffer;
       try {
-        // 1) Preferred path: read straight from the sandbox FS over RPC.
-        //    Binary-safe. Works for anything the agent wrote with `execute`
-        //    (docx/pdf/zip/etc.) or `write_file`. Retry once if the cached
-        //    sandbox handle is stale.
-        let sandboxBytes: Buffer | null = null;
-        if (getSandbox) {
-          let sandbox = await getSandbox();
-          let attempt = await readFromSandbox(
-            sandbox,
-            input.path,
-            runtime.signal,
-          );
-          if (attempt && "closed" in attempt) {
-            log.warn(
-              "Sandbox closed mid-read; re-provisioning and retrying once",
-              { path: input.path },
-            );
-            sandbox = await getSandbox({ force: true });
-            attempt = await readFromSandbox(
-              sandbox,
-              input.path,
-              runtime.signal,
-            );
-            if (attempt && "closed" in attempt) {
-              return JSON.stringify({
-                ok: false,
-                error:
-                  "sandbox connection closed; could not re-provision in time",
-              });
-            }
+        if (sandbox) {
+          const [file] = await sandbox.downloadFiles([input.path]);
+          if (!file?.content) {
+            return JSON.stringify({
+              ok: false,
+              error: `could not read ${input.path}: ${file?.error ?? "unknown error"}`,
+            });
           }
-          if (attempt && "bytes" in attempt) {
-            sandboxBytes = attempt.bytes;
-          }
-        }
-
-        if (sandboxBytes) {
-          bytes = sandboxBytes;
+          bytes = Buffer.from(file.content);
         } else {
-          // 2) Fallback: agent harness backend. This path mangles binaries
-          //    because the Deno SDK's `downloadFiles` round-trips file content
-          //    through a UTF-8 decoded string (every non-UTF-8 byte becomes
-          //    U+FFFD). It's only safe for text content / StateBackend.
+          // No sandbox: files live in LangGraph state as strings.
           const resolved = await resolveBackend(backend, runtime);
           const readResult = await resolved.read(input.path);
           if (readResult.error || readResult.content == null) {
@@ -203,19 +131,15 @@ export function createSendFileTool(
           if (typeof raw !== "string") {
             bytes = Buffer.from(raw as Uint8Array);
           } else {
-            // Heuristic: pull-file stores binaries as base64. If a binary-ish
-            // kind contains a valid-looking base64 blob, decode it.
+            // Heuristic: pull-file stores binaries as base64 in state. If a
+            // binary-ish kind contains a valid-looking base64 blob, decode it.
             const detected = detectKindAndMime(input.path, {
               ...(input.kind !== undefined ? { kind: input.kind } : {}),
             });
             const isLikelyBinary =
               detected.kind !== "document" || detected.mimetype !== "text/plain";
             if (isLikelyBinary && /^[A-Za-z0-9+/=\s]+$/.test(raw)) {
-              try {
-                bytes = Buffer.from(raw, "base64");
-              } catch {
-                bytes = Buffer.from(raw, "utf-8");
-              }
+              bytes = Buffer.from(raw, "base64");
             } else {
               bytes = Buffer.from(raw, "utf-8");
             }

@@ -22,7 +22,7 @@ import {
 
 import { resolveModel } from "./models.js";
 import { createLogger } from "./logger.js";
-import { getSandbox, isSandboxConfigured } from "./sandbox.js";
+import { getSandbox } from "./sandbox.js";
 import { createSkillsSandboxSyncMiddleware } from "./skills-sync.js";
 
 const log = createLogger("core/agent");
@@ -204,13 +204,13 @@ export async function buildAgent(def: AgentDefinition) {
     (def.subagents?.some((s) => (s.skillSets?.length ?? 0) > 0) ?? false);
 
   // Sandbox decision:
-  //   - if DENO_DEPLOY_TOKEN is set, use a shared Deno sandbox as the default
-  //     backend so the agent gets an `execute` tool (shell access) AND we can
-  //     upload skill scripts into it.
-  //   - if not, fall back to the ephemeral StateBackend (no shell).
-  // Sandbox provisioning is best-effort: if it fails, we degrade gracefully
-  // to the no-shell mode rather than failing the build.
-  const sandbox = isSandboxConfigured() ? await getSandbox() : null;
+  //   - when a sandbox is available (local bubblewrap by default, see
+  //     core/sandbox.ts), it is the default backend, so the agent gets an
+  //     `execute` tool (shell access) and skill scripts can run.
+  //   - otherwise, fall back to the ephemeral StateBackend (no shell).
+  // Sandbox startup is best-effort: if it fails, we degrade gracefully to
+  // the no-shell mode rather than failing the build.
+  const sandbox = await getSandbox();
 
   const skillsRouteKey = `${SKILLS_VIRTUAL_PREFIX}/`;
   const backend: AnyBackendProtocol | undefined = (() => {
@@ -238,19 +238,13 @@ export async function buildAgent(def: AgentDefinition) {
 
   // When the sandbox is the default backend AND we have skill sets, sync the
   // host skill files into the sandbox before each invocation so the agent
-  // can actually `execute` scripts that ship with a skill.
-  //
-  // We pass `getSandbox` as a callable (not the captured `sandbox` instance)
-  // so the middleware can re-fetch a fresh, health-probed handle on every
-  // run. Long-lived processes (the WhatsApp server) routinely outlive their
-  // remote Deno sandbox; without this, every run after the sandbox dies
-  // tries to upload to a zombie handle and the per-file `uploadFiles`
-  // errors all collapse to a generic `"invalid_path"`.
+  // can actually `execute` scripts that ship with a skill. The sandbox object
+  // is stable across provider restarts, so capturing it here is safe.
   const skillsMiddleware =
     sandbox && wantsSkills
       ? [
           createSkillsSandboxSyncMiddleware({
-            getSandbox,
+            sandbox,
             skillsRoot: SKILLS_ROOT,
             virtualPrefix: SKILLS_VIRTUAL_PREFIX,
           }),
@@ -270,7 +264,7 @@ export async function buildAgent(def: AgentDefinition) {
     subagents: subagents?.map((s) => s.name) ?? [],
     skillSets: def.skillSets ?? [],
     memory: checkpointer ? "enabled" : "disabled",
-    sandbox: sandbox ? `deno:${sandbox.id}` : "off",
+    sandbox: sandbox ? sandbox.describe() : "off",
   });
 
   const agent = createDeepAgent({

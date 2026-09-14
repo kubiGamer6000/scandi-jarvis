@@ -9,6 +9,7 @@ import { ToolMessage } from "@langchain/core/messages";
 import { z } from "zod";
 
 import { createLogger } from "../../core/logger.js";
+import type { JarvisSandbox } from "../../core/sandbox.js";
 import type { WhatsappClient } from "../../apps/whatsapp/client.js";
 
 import { readWhatsappContext, type WhatsappContext } from "./runtime-context.js";
@@ -19,9 +20,15 @@ const DEFAULT_DEST_DIR = "/home/app/wa-incoming";
 
 export function createPullFileTool(
   client: WhatsappClient,
-  options: { backend?: AnyBackendProtocol } = {},
+  options: {
+    /** Virtual-FS backend used when there is no sandbox. */
+    backend?: AnyBackendProtocol;
+    /** The agent's sandbox. When set, files are written there as raw bytes. */
+    sandbox?: Pick<JarvisSandbox, "uploadFiles">;
+  } = {},
 ) {
   const backend = options.backend ?? new StateBackend();
+  const sandbox = options.sandbox;
 
   return tool(
     async (
@@ -49,13 +56,31 @@ export function createPullFileTool(
         `wa-${input.seq}.bin`;
       const dest = input.dest_path ?? `${DEFAULT_DEST_DIR}/${filename}`;
 
-      const resolved = await resolveBackend(backend, runtime);
+      // With a sandbox, write the real bytes so `execute` tools (pdftotext,
+      // python, unzip…) can open the file directly.
+      if (sandbox) {
+        const [upload] = await sandbox.uploadFiles([[dest, new Uint8Array(dl.bytes)]]);
+        if (!upload || upload.error) {
+          return JSON.stringify({
+            ok: false,
+            error: `could not write ${dest}: ${upload?.error ?? "unknown error"}`,
+          });
+        }
+        const meta = {
+          ok: true as const,
+          seq: input.seq,
+          path: dest,
+          mime_type: dl.mimeType,
+          size_bytes: dl.bytes.byteLength,
+          encoding: "raw" as const,
+        };
+        log.info("pulled media", { chat_jid: ctx.chatJid, ...meta });
+        return JSON.stringify(meta);
+      }
 
-      // The agent's virtual FS expects string content. Encode bytes as base64
-      // when they're not safely UTF-8 (anything with NUL or non-UTF-8 sequences).
-      // For most documents we can store the raw decoded UTF-8 (PDFs are binary
-      // — we keep them as base64). The agent reads base64 back via decode tools
-      // or shell commands in the sandbox.
+      // No sandbox: the virtual FS in LangGraph state only holds strings, so
+      // binaries are stored base64-encoded.
+      const resolved = await resolveBackend(backend, runtime);
       const isText =
         dl.mimeType.startsWith("text/") || dl.mimeType.includes("json");
       const content = isText
@@ -83,9 +108,7 @@ export function createPullFileTool(
 
       const summary =
         `Pulled message ${input.seq} (${dl.mimeType}, ${dl.bytes.byteLength} bytes) → ${dest}` +
-        (isText
-          ? ""
-          : " (stored base64-encoded; use `execute base64 -d ...` in the sandbox or have a tool decode it).");
+        (isText ? "" : " (stored base64-encoded).");
 
       const message = new ToolMessage({
         content: JSON.stringify(meta),
@@ -106,7 +129,7 @@ export function createPullFileTool(
       description:
         "Download media (image, document, audio, video) attached to a WhatsApp message and write it into your virtual filesystem so you can `read_file` or `execute` against it. " +
         "Pass `seq` of the message that carries the attachment; optionally pass `dest_path` (absolute, e.g. /home/app/uploads/spec.pdf) — otherwise the file lands in /home/app/wa-incoming/<filename>. " +
-        "Binary files (PDFs, images, etc.) are stored base64-encoded; the response tells you. Text-ish files are stored as UTF-8.",
+        "The file is written byte-for-byte, ready for `execute` (e.g. `pdftotext`, python). Without a sandbox, binaries are stored base64-encoded instead — the response's `encoding` field tells you which.",
       schema: z.object({
         seq: z
           .number()

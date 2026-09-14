@@ -17,8 +17,11 @@ What runs in a single Node process (`dist/apps/whatsapp/server.js`):
 - Per-chat dispatcher state machine (debounce → run → optional
   hard-interrupt + restart) backed by an in-memory `p-queue`
 - The shared `jarvis-whatsapp` DeepAgent (Anthropic + Composio +
-  optional Deno sandbox), checkpointed per chat to `langgraph.*` tables
-  in Supabase via `PostgresSaver`
+  sandboxed `execute` shell), checkpointed per chat to `langgraph.*`
+  tables in Supabase via `PostgresSaver`
+- The local sandbox: each `execute` call is a short-lived `bwrap`
+  child process (bubblewrap) inside the same systemd unit, with its
+  workspace under `/opt/scandi-jarvis/.sandbox/`
 
 Optional sidecar:
 
@@ -67,11 +70,16 @@ Outbound 443 to:
   tool execution
 - `*.supabase.co` — Postgres (same as the bot)
 - `*.deno.com` / `*.deno.dev` — Deno sandbox provisioning + RPC (only if
-  `DENO_DEPLOY_TOKEN` is set)
+  `JARVIS_SANDBOX_PROVIDER=deno`)
 - `api.smith.langchain.com` — LangSmith tracing (only if
   `LANGSMITH_TRACING=true`)
 
 All already allowed by the bot's outbound-any rule.
+
+With the default `JARVIS_SANDBOX_NETWORK=true`, code the agent runs in the
+local sandbox shares the host's network too (`pip install`, `curl`, …),
+including services on `127.0.0.1` — it just doesn't have their tokens.
+Set `JARVIS_SANDBOX_NETWORK=false` if you don't want that.
 
 ---
 
@@ -127,7 +135,7 @@ Recommended optional vars:
 
 | Var                                                            | Why                                                                                   |
 | -------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
-| `DENO_DEPLOY_TOKEN` (+ `DENO_DEPLOY_ORG` for personal tokens)  | Adds the `execute` shell tool + lets skill scripts run. Strongly recommended.         |
+| `JARVIS_SANDBOX_PROVIDER`                                      | `local` (default) = bubblewrap shell on the droplet, needs §3.2b. `deno` = Deno Deploy (+ `DENO_DEPLOY_TOKEN`, `DENO_DEPLOY_ORG` for personal tokens), falls back to local. `none` = no `execute` tool. |
 | `COMPOSIO_API_KEY` / `COMPOSIO_USER_ID`                        | Required for the Shopify subagent.                                                    |
 | `TAVILY_API_KEY`                                               | Enables Tavily `internet_search` and `tavily_deep_research` (without it both return an error string). |
 | `LANGSMITH_TRACING=true` / `LANGSMITH_API_KEY` / `LANGSMITH_PROJECT` | Trace every run in <https://smith.langchain.com>. Cheap and worth it.            |
@@ -136,6 +144,42 @@ Recommended optional vars:
 > The `scandi-jarvis` env loader uses Zod and will **refuse to start**
 > if any required var is missing — you'll see a clear `Invalid
 > environment configuration` error in the journal.
+
+### 3.2b Sandbox setup
+
+Only needed for `JARVIS_SANDBOX_PROVIDER=local` (the default) — and for
+`deno`, which falls back to it. One-time, as root:
+
+```bash
+cd /opt/scandi-jarvis
+sudo bash scripts/setup-sandbox.sh
+```
+
+It installs `bubblewrap`, `python3-venv`, `poppler-utils`, `qpdf`,
+`pandoc` and `tesseract-ocr` (add `WITH_LIBREOFFICE=1` for LibreOffice),
+adds an AppArmor profile at `/etc/apparmor.d/bwrap` that lets
+`/usr/bin/bwrap` create user namespaces (Ubuntu 24.04 blocks this by
+default via `kernel.apparmor_restrict_unprivileged_userns=1`), creates
+`/opt/scandi-jarvis/.sandbox` owned by `scandi`, and builds the Python
+venv + `node_modules` toolchain as `scandi`. It finishes with a
+bubblewrap self-test.
+
+To rebuild just the toolchain later (e.g. after adding a package to
+`PY_PACKAGES` in the script), no sudo needed:
+
+```bash
+sudo -u scandi npm run setup:sandbox
+```
+
+Check it end-to-end — ideally before the service is running, since
+every sandbox start wipes `.sandbox/tmp`:
+
+```bash
+sudo -u scandi npm run smoke:sandbox
+```
+
+The systemd unit needs nothing extra: `ReadWritePaths=/opt/scandi-jarvis`
+already covers `.sandbox/`, and the unit doesn't set `RestrictNamespaces`.
 
 ### 3.3 Apply the migration
 
@@ -201,8 +245,9 @@ RestrictRealtime=true
 RestrictSUIDSGID=true
 LockPersonality=true
 
-# Resource limits — Anthropic responses can be chunky and the Deno sandbox
-# RPC stays in-process. 1.5G is plenty headroom.
+# Resource limits — Anthropic responses can be chunky, and local sandbox
+# commands run in this unit's cgroup, so the cap covers them too (they're
+# OOM-killed before the server). 1.5G is plenty headroom.
 MemoryMax=1500M
 TasksMax=512
 
@@ -677,8 +722,9 @@ Under the hood (`/opt/scandi-jarvis/scripts/deploy.sh`):
 6. Quick `/health` ping, then tail the journal.
 
 The systemd unit's `SIGTERM` handler drains in-flight runs (5s grace),
-closes the Fastify socket, closes the Postgres pool, and lets the Deno
-sandbox idle out — so a deploy mid-conversation won't drop the user's
+closes the Fastify socket, closes the Postgres pool, and closes the
+sandbox (killing any still-running sandbox commands) — so a deploy
+mid-conversation won't drop the user's
 message (the wa-bot retries deliveries with backoff if Jarvis is down
 for the restart window).
 
@@ -804,9 +850,12 @@ don't log on their own. See `src/core/tool-trace.ts`.
 | `400 querystring/after_seq must be >= 1`                                                           | Old build that paged messages with `after_seq=0` on first-summary runs. Fixed; redeploy.                            | `jarvis deploy`.                                                                                                               |
 | `400 A maximum of 4 blocks with cache_control may be provided`                                     | DeepAgents' auto Anthropic prompt-caching middleware exceeding Anthropic's cap. Already disabled in the runner.   | `jarvis deploy` if you're on an old build; otherwise see `src/apps/whatsapp/runner.ts` (`enableCaching: false`).               |
 | Agent runs, replies are sent, but the user sees nothing                                            | `JARVIS_WA_ALLOWED_CHATS` doesn't include the chat's JID. The dispatcher silently drops disallowed chats.          | Add the JID (use `*` for fully open) and `jarvis restart`.                                                                     |
-| `whatsapp_send_file` returns `File '…' not found` instantly                                        | The WA file tools are using a different backend from `write_file` / `execute`.                                     | Already fixed in `src/apps/whatsapp/agent.ts` (passes the shared Deno sandbox). Redeploy.                                      |
+| `whatsapp_send_file` returns `File '…' not found` instantly                                        | The WA file tools are using a different backend from `write_file` / `execute`.                                     | Already fixed in `src/apps/whatsapp/agent.ts` (passes the shared sandbox). Redeploy.                                           |
 | Agent reports the wrong local time                                                                 | Old build that defaulted to UTC and let the agent do TZ math.                                                      | `jarvis deploy`. Current tool defaults to `Europe/Stockholm` and returns `tz_abbrev`/`utc_offset` so there's no math to do.    |
 | `MemoryMax=1500M` killed the service mid-run                                                       | Long conversation + big sandboxed tool output blew the cap.                                                        | Edit the unit, bump to `2G`, `daemon-reload`, restart. Long-term: tighten `JARVIS_WA_CONTEXT_MSGS` or `summarizationMiddleware`. |
+| `bubblewrap self-test failed … setting up uid map: Permission denied` in the journal                | AppArmor profile for `bwrap` missing, so Ubuntu blocks its user namespaces.                                        | `sudo bash scripts/setup-sandbox.sh` (§3.2b), then `jarvis restart`.                                                           |
+| `No sandbox provider could be started` in the journal                                              | Same as above, or `bubblewrap` not installed.                                                                      | `sudo bash scripts/setup-sandbox.sh` (§3.2b), then `jarvis restart`. Confirm with `npm run smoke:sandbox`.                     |
+| Sandboxed script fails with `ModuleNotFoundError` (Python)                                         | Toolchain not built, or the package isn't in `PY_PACKAGES`.                                                        | Rerun `sudo -u scandi npm run setup:sandbox`; for a new package add it to `PY_PACKAGES` in `scripts/setup-sandbox.sh` first.   |
 | Webhook deliveries pile up `pending` on the bot side                                               | Jarvis is up but each run takes longer than `WEBHOOK_TIMEOUT_MS` (default 10s). The webhook ACKs *before* the run starts so this is rare. | Check `jarvis logs` for slow tools. The dispatcher ACKs the webhook immediately; deliveries should be sub-second.        |
 | `LANGSMITH_TRACING=true` but nothing shows up                                                      | `LANGSMITH_API_KEY` missing or project name typo'd.                                                                | Check `LANGSMITH_PROJECT` in `.env` matches a project you can see in smith.langchain.com.                                      |
 | Workflow `revolut-daily-expenses` fails: `RevolutExpensesHttpError: …` or `fetch failed` against `127.0.0.1:8080` | The `scandi-revolut-expenses` API isn't running on the droplet, or `REVOLUT_EXPENSES_API_KEY` doesn't match the API's `API_KEYS`. | `revolut status` / `revolut health` to confirm. Then re-check the key in `/opt/scandi-jarvis/.env` against `/opt/scandi-revolut-expenses/.env`. See [scandi-revolut-expenses/docs/DEPLOYMENT.md](../../scandi-revolut-expenses/docs/DEPLOYMENT.md). |
@@ -844,7 +893,8 @@ lives in Supabase:
 | Chat summaries + notes              | `jarvis.chat_context`                                       | Supabase daily snapshot            |
 | Webhook idempotency                 | `jarvis.wa_webhook_seen` (24h TTL — disposable)             | (no backup needed)                 |
 | LangGraph checkpoints (per chat)    | `langgraph.checkpoints`                                     | Supabase daily snapshot            |
-| `.env` + sandbox token              | `/opt/scandi-jarvis/.env`                                   | **You** — password manager copy.   |
+| `.env` (incl. any Deno token)       | `/opt/scandi-jarvis/.env`                                   | **You** — password manager copy.   |
+| Sandbox workspace + toolchain       | `/opt/scandi-jarvis/.sandbox/`                              | (scratch — rebuild with §3.2b)     |
 
 If a chat's checkpoint table grows unwieldy, you can wipe per-thread
 state without losing summaries/notes:
@@ -905,9 +955,13 @@ cp .env.example .env && nano .env
 #    SUPABASE_DB_URL=$(grep ^DATABASE_URL= /opt/scandi-wa-bot/.env | cut -d= -f2-)
 #    JARVIS_WA_ALLOWED_CHATS=*   # or a comma-separated whitelist
 #  Recommended:
-#    DENO_DEPLOY_TOKEN=…   COMPOSIO_API_KEY=…   TAVILY_API_KEY=…
+#    COMPOSIO_API_KEY=…   TAVILY_API_KEY=…
 #    LANGSMITH_TRACING=true LANGSMITH_API_KEY=… LANGSMITH_PROJECT=scandi-jarvis
+#  Sandbox: JARVIS_SANDBOX_PROVIDER=local is the default (see §3.2b)
 chmod 600 .env
+
+# ── 2b. sandbox (one-time, as root) ────────────────────────────────────
+sudo bash scripts/setup-sandbox.sh
 
 # ── 3. migrate ─────────────────────────────────────────────────────────
 psql "$(grep ^SUPABASE_DB_URL= .env | cut -d= -f2-)" -f db/migrations/001_jarvis_init.sql

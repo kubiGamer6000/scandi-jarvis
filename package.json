@@ -12,6 +12,7 @@
     "chat:jarvis": "tsx src/apps/cli.ts jarvis",
     "smoke": "tsx scripts/smoke-test.ts",
     "smoke:sandbox": "tsx scripts/sandbox-smoke.ts",
+    "setup:sandbox": "bash scripts/setup-sandbox.sh --tools-only",
     "smoke:shopify-skill": "tsx scripts/test-shopify-skill.ts",
     "smoke:wa-client": "tsx scripts/wa-client-smoke.ts",
     "smoke:wa-dispatcher": "tsx scripts/wa-dispatcher-smoke.ts",

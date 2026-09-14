@@ -1,236 +1,309 @@
-import { DenoSandbox } from "@langchain/deno";
-import type { Memory } from "@deno/sandbox";
+import { createHash } from "node:crypto";
+import type { Dirent } from "node:fs";
+import { readFile, readdir, stat } from "node:fs/promises";
+import path from "node:path";
+
+import {
+  BaseSandbox,
+  type ExecuteResponse,
+  type FileDownloadResponse,
+  type FileUploadResponse,
+} from "deepagents";
 
 import { env, hasCredential } from "./env.js";
 import { createLogger } from "./logger.js";
+import { DenoSandboxProvider, isSandboxClosedError } from "./sandbox-deno.js";
+import { LocalSandbox } from "./sandbox-local.js";
 
 const log = createLogger("core/sandbox");
 
-/**
- * Process-wide singleton wrapper around a {@link DenoSandbox}.
- *
- * Why a singleton:
- *   - sandboxes cost money + take a few seconds to provision; we don't want
- *     to spin one up per `buildAgent()` call (the LangGraph dev server alone
- *     calls `buildAgent` 4–5 times during graph initialisation),
- *   - subagents share the parent's backend, so all agents in this process
- *     share one sandbox (which is what we want for cost + latency anyway),
- *   - the `langgraph dev` server is long-lived – one sandbox per dev session
- *     is the right granularity.
- *
- * Lifetime:
- *   - controlled by {@link env.JARVIS_SANDBOX_TIMEOUT} (default `"session"`,
- *     which means the sandbox dies when this Node process disconnects),
- *   - we also register `SIGINT` / `SIGTERM` / `beforeExit` handlers that
- *     best-effort `close()` the sandbox so we don't leave it hanging on the
- *     Deno side.
- *
- * Returns `null` (and does NOT throw) when no `DENO_DEPLOY_TOKEN` is
- * configured – callers should treat sandbox support as opt-in.
- */
-let sandboxPromise: Promise<DenoSandbox | null> | null = null;
-let cleanupRegistered = false;
+type Provider = LocalSandbox | DenoSandboxProvider;
 
-export function isSandboxConfigured(): boolean {
-  return hasCredential("DENO_DEPLOY_TOKEN");
-}
+/** After Deno fails, stay on the local sandbox this long before retrying. */
+const DENO_RETRY_COOLDOWN_MS = 15 * 60_000;
 
 /**
- * True if the error message indicates the sandbox/RPC connection has died.
+ * The one sandbox every agent in this process shares.
  *
- * The Deno SDK exposes this as plain `Error("Connection to the sandbox was
- * already closed")` from `fs.*` calls, or as `DenoSandboxError` with messages
- * like "Failed to execute…: …closed" from `execute()`. There's no error code
- * we can switch on, so we substring-match.
+ * It is a stable object handed to `createDeepAgent` as the backend, and it
+ * forwards `execute` / `uploadFiles` / `downloadFiles` to whichever provider
+ * is currently live. Everything else (`read`, `write`, `edit`, `ls`, `grep`,
+ * `glob`) comes from deepagents' `BaseSandbox`, built on those three.
+ *
+ * Providers (`JARVIS_SANDBOX_PROVIDER`):
+ *   - `local` (default): bubblewrap-isolated shell on this host. Free, no
+ *     network hop, survives anything short of the host going down.
+ *   - `deno`: Deno Deploy sandbox first; if it can't be provisioned or its
+ *     connection dies and can't be re-established, fail over to `local`, and
+ *     try Deno again after a cooldown (at the start of a run, never mid-run).
+ *   - `none`: no sandbox — agents get no `execute` tool.
+ *
+ * Because the agent holds this wrapper rather than a provider, a dead
+ * provider is swapped out underneath it without rebuilding the agent.
  */
-export function isSandboxClosedError(err: unknown): boolean {
-  const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
-  return (
-    msg.includes("already closed") ||
-    msg.includes("connection closed") ||
-    msg.includes("sandbox is closed") ||
-    msg.includes("not initialized")
-  );
-}
+export class JarvisSandbox extends BaseSandbox {
+  readonly #preference: "local" | "deno";
+  #local: LocalSandbox | null = null;
+  #active: Provider | null = null;
+  #switching: Promise<Provider> | null = null;
+  #denoRetryAt = 0;
+  /** provider id + target → signature of the last successful directory sync. */
+  readonly #synced = new Map<string, string>();
 
-/**
- * Cheap health probe to confirm the cached sandbox still works.
- *
- * We deliberately avoid `execute()` (heavier; goes through bash) and use a
- * direct RPC `fs.stat("/")`. The SDK's `fs.stat` doesn't accept a signal so
- * we race it against a 3s timeout to avoid hanging forever on a half-open
- * connection. ~hundreds of ms when the sandbox is healthy; throws (or times
- * out) when the connection is dead.
- */
-async function probeSandbox(sandbox: DenoSandbox): Promise<boolean> {
-  if (!sandbox.isRunning) return false;
-  try {
-    let timer: NodeJS.Timeout | undefined;
-    const timeout = new Promise<never>((_resolve, reject) => {
-      timer = setTimeout(
-        () => reject(new Error("sandbox probe timed out after 3000ms")),
-        3000,
-      );
-    });
+  constructor(preference: "local" | "deno") {
+    super();
+    this.#preference = preference;
+  }
+
+  get id(): string {
+    return this.#active?.id ?? "jarvis-sandbox";
+  }
+
+  /** e.g. `local-1a2b3c4d` / `deno-…`, for logs. */
+  describe(): string {
+    return this.#active ? this.#active.id : "unavailable";
+  }
+
+  /** Provision the first provider. Returns false if none could start. */
+  async start(): Promise<boolean> {
     try {
-      await Promise.race([sandbox.instance.fs.stat("/"), timeout]);
+      await this.#current();
       return true;
-    } finally {
-      if (timer) clearTimeout(timer);
+    } catch (err) {
+      log.error("No sandbox provider could be started – agents will run without `execute`", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return false;
     }
-  } catch (err) {
-    log.warn("Cached sandbox failed health probe – will re-provision", {
-      id: sandbox.id,
-      error: err instanceof Error ? err.message : String(err),
-    });
-    return false;
   }
-}
 
-async function provisionSandbox(): Promise<DenoSandbox | null> {
-  const t0 = Date.now();
-  log.info("Provisioning Deno sandbox", {
-    timeout: env.JARVIS_SANDBOX_TIMEOUT,
-    memory: env.JARVIS_SANDBOX_MEMORY,
-  });
-  try {
-    const sandbox = await DenoSandbox.create({
-      token: env.DENO_DEPLOY_TOKEN,
-      ...(env.DENO_DEPLOY_ORG ? { org: env.DENO_DEPLOY_ORG } : {}),
-      memory: env.JARVIS_SANDBOX_MEMORY as Memory,
-      timeout: env.JARVIS_SANDBOX_TIMEOUT as "session" | `${number}s` | `${number}m`,
-    });
-    log.info("Deno sandbox ready", {
-      id: sandbox.id,
-      elapsed_ms: Date.now() - t0,
-    });
-    return sandbox;
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    log.error("Failed to provision Deno sandbox – falling back to no-shell mode", {
-      error: message,
-    });
-    return null;
-  }
-}
-
-/**
- * Lazily get (or create) the shared Deno sandbox for this process.
- *
- * - First call: provisions a fresh sandbox (this can take several seconds).
- * - Subsequent calls: probe the cached handle with a cheap `fs.stat("/")`
- *   and return it if alive. If the probe fails (e.g. the sandbox timed out
- *   on the Deno side — `JARVIS_SANDBOX_TIMEOUT="session"` dies when the
- *   client connection blips), the cache is cleared and a fresh sandbox is
- *   provisioned.
- * - Pass `{ force: true }` to bypass the cache entirely (used after we know
- *   a call just hit a closed-connection error and we want to retry).
- * - Returns `null` when `DENO_DEPLOY_TOKEN` is unset.
- */
-export async function getSandbox(
-  opts: { force?: boolean } = {},
-): Promise<DenoSandbox | null> {
-  if (!isSandboxConfigured()) return null;
-
-  registerCleanup();
-
-  if (opts.force) {
-    await resetSandbox();
-  } else if (sandboxPromise) {
-    const cached = await sandboxPromise;
-    if (cached && (await probeSandbox(cached))) {
-      return cached;
+  /**
+   * Called at the start of every agent run: health-check a Deno provider and,
+   * when running on the local fallback, retry Deno once the cooldown passes.
+   */
+  async refresh(): Promise<void> {
+    const active = this.#active;
+    if (active?.kind === "deno" && !(await active.probe())) {
+      await this.#drop(active);
     }
-    // Probe failed – clear and fall through to re-provision.
-    sandboxPromise = null;
-    // Best-effort close of the dead handle so we don't leak it on the Deno side.
-    if (cached) {
-      try {
-        await cached.close();
-      } catch {
-        // already dead – nothing to do
+    if (
+      this.#preference === "deno" &&
+      this.#active?.kind === "local" &&
+      Date.now() >= this.#denoRetryAt
+    ) {
+      const deno = await this.#tryDeno();
+      if (deno) {
+        log.info("Deno sandbox is back – switching from local fallback", { id: deno.id });
+        this.#active = deno;
       }
     }
+    await this.#current().catch(() => undefined);
   }
 
-  if (!sandboxPromise) {
-    sandboxPromise = provisionSandbox().then((sandbox) => {
-      if (sandbox === null) sandboxPromise = null;
-      return sandbox;
+  override async execute(command: string): Promise<ExecuteResponse> {
+    try {
+      return await this.#withProvider((p) => p.execute(command));
+    } catch (err) {
+      return {
+        output: `Error: sandbox unavailable (${err instanceof Error ? err.message : String(err)})`,
+        exitCode: 1,
+        truncated: false,
+      };
+    }
+  }
+
+  override uploadFiles(
+    files: Array<[string, Uint8Array]>,
+  ): Promise<FileUploadResponse[]> {
+    return this.#withProvider((p) => p.uploadFiles(files));
+  }
+
+  override downloadFiles(paths: string[]): Promise<FileDownloadResponse[]> {
+    return this.#withProvider((p) => p.downloadFiles(paths));
+  }
+
+  /**
+   * Mirror a host directory into the sandbox at `target` (replacing what was
+   * there). Skipped when nothing changed since the last sync to the same
+   * provider, so calling it every run is cheap.
+   */
+  async syncDirectory(hostDir: string, target: string): Promise<void> {
+    const files = await walkFiles(hostDir);
+    if (files.length === 0) return;
+
+    const hash = createHash("sha256");
+    for (const file of files) {
+      const st = await stat(file);
+      hash.update(`${file}\0${st.size}\0${st.mtimeMs}\n`);
+    }
+    const signature = hash.digest("hex");
+
+    const provider = await this.#current();
+    const key = `${provider.id}:${target}`;
+    if (this.#synced.get(key) === signature) return;
+
+    const payload: Array<[string, Uint8Array]> = [];
+    for (const file of files) {
+      const rel = path.relative(hostDir, file).split(path.sep).join("/");
+      payload.push([path.posix.join(target, rel), new Uint8Array(await readFile(file))]);
+    }
+
+    const quoted = `'${target.replaceAll("'", "'\\''")}'`;
+    await this.execute(`rm -rf ${quoted}`);
+    const results = await this.uploadFiles(payload);
+    const failed = results.filter((r) => r.error);
+    if (failed.length > 0) {
+      log.warn("Some files failed to sync into the sandbox", {
+        target,
+        failed: failed.slice(0, 10).map((r) => ({ path: r.path, error: r.error })),
+        failedCount: failed.length,
+      });
+      return;
+    }
+    // Uploads don't carry file modes; skills invoke scripts directly
+    // (`scripts/search_docs.mjs …`), so restore the executable bit.
+    await this.execute(
+      `find ${quoted} -type f \\( -name '*.sh' -o -name '*.py' -o -name '*.mjs' -o -name '*.js' -o -name '*.cjs' \\) -exec chmod +x {} +`,
+    );
+    // Key on the provider that actually received the files (a failover
+    // mid-sync would have changed it).
+    this.#synced.set(`${this.id}:${target}`, signature);
+    log.debug("Synced directory into sandbox", {
+      target,
+      files: payload.length,
+      provider: this.id,
     });
+  }
+
+  async close(): Promise<void> {
+    const providers = new Set([this.#active, this.#local]);
+    this.#active = null;
+    this.#local = null;
+    for (const p of providers) {
+      if (!p) continue;
+      log.info("Closing sandbox", { id: p.id });
+      await p.close().catch(() => undefined);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+
+  async #withProvider<T>(op: (p: Provider) => Promise<T>): Promise<T> {
+    const provider = await this.#current();
+    try {
+      return await op(provider);
+    } catch (err) {
+      if (provider.kind !== "deno" || !isSandboxClosedError(err)) throw err;
+      log.warn("Deno sandbox connection closed – re-provisioning and retrying once", {
+        id: provider.id,
+      });
+      await this.#drop(provider);
+      return op(await this.#current());
+    }
+  }
+
+  async #current(): Promise<Provider> {
+    if (this.#active?.isRunning) return this.#active;
+    if (!this.#switching) {
+      this.#switching = this.#provision().finally(() => {
+        this.#switching = null;
+      });
+    }
+    return this.#switching;
+  }
+
+  async #provision(): Promise<Provider> {
+    if (this.#preference === "deno" && Date.now() >= this.#denoRetryAt) {
+      const deno = await this.#tryDeno();
+      if (deno) return (this.#active = deno);
+      log.warn("Falling back to the local sandbox", {
+        retry_deno_in_min: DENO_RETRY_COOLDOWN_MS / 60_000,
+      });
+    }
+    return (this.#active = await this.#getLocal());
+  }
+
+  async #tryDeno(): Promise<DenoSandboxProvider | null> {
+    if (!hasCredential("DENO_DEPLOY_TOKEN")) {
+      log.warn("JARVIS_SANDBOX_PROVIDER=deno but DENO_DEPLOY_TOKEN is not set");
+      this.#denoRetryAt = Number.POSITIVE_INFINITY;
+      return null;
+    }
+    try {
+      return await DenoSandboxProvider.create();
+    } catch (err) {
+      this.#denoRetryAt = Date.now() + DENO_RETRY_COOLDOWN_MS;
+      log.error("Failed to provision Deno sandbox", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return null;
+    }
+  }
+
+  async #getLocal(): Promise<LocalSandbox> {
+    if (this.#local?.isRunning) return this.#local;
+    const local = new LocalSandbox({
+      rootDir: path.resolve(process.cwd(), env.JARVIS_SANDBOX_DIR),
+      timeoutSec: env.JARVIS_SANDBOX_EXEC_TIMEOUT_SEC,
+      maxOutputBytes: env.JARVIS_SANDBOX_MAX_OUTPUT_BYTES,
+      maxFileMb: env.JARVIS_SANDBOX_MAX_FILE_MB,
+      network: env.JARVIS_SANDBOX_NETWORK === "true",
+      maxConcurrency: env.JARVIS_SANDBOX_MAX_CONCURRENCY,
+    });
+    await local.start();
+    return (this.#local = local);
+  }
+
+  async #drop(provider: Provider): Promise<void> {
+    if (this.#active === provider) this.#active = null;
+    await provider.close();
+  }
+}
+
+let sandboxPromise: Promise<JarvisSandbox | null> | null = null;
+
+/** Whether this process is configured to use a sandbox at all. */
+export function isSandboxConfigured(): boolean {
+  return env.JARVIS_SANDBOX_PROVIDER !== "none";
+}
+
+/**
+ * The process-wide sandbox, started on first call. Resolves to `null` when
+ * the sandbox is disabled or no provider could start (logged loudly) — agents
+ * then run without the `execute` tool.
+ */
+export function getSandbox(): Promise<JarvisSandbox | null> {
+  const preference = env.JARVIS_SANDBOX_PROVIDER;
+  if (preference === "none") return Promise.resolve(null);
+  if (!sandboxPromise) {
+    sandboxPromise = (async () => {
+      const sandbox = new JarvisSandbox(preference);
+      return (await sandbox.start()) ? sandbox : null;
+    })();
   }
   return sandboxPromise;
 }
 
-/**
- * Drop the cached sandbox handle. Best-effort closes the underlying sandbox
- * if it's still considered running. Next `getSandbox()` will provision a
- * fresh one. Safe to call multiple times concurrently.
- *
- * Useful after a caller catches a "Connection to the sandbox was already
- * closed" error and wants to retry against a fresh sandbox.
- */
-export async function resetSandbox(): Promise<void> {
-  const pending = sandboxPromise;
-  sandboxPromise = null;
-  if (!pending) return;
-  try {
-    const sandbox = await pending;
-    if (sandbox && sandbox.isRunning) {
-      try {
-        await sandbox.close();
-      } catch {
-        // already dead
-      }
-    }
-  } catch {
-    // provisioning never succeeded
-  }
-}
-
-/**
- * Best-effort shutdown of the shared sandbox. Safe to call multiple times.
- *
- * The CLI calls this on graceful exit; the auto-registered process hooks call
- * it on SIGINT/SIGTERM/beforeExit. After this returns the singleton is reset,
- * so a subsequent `getSandbox()` would provision a fresh one.
- *
- * Functionally equivalent to {@link resetSandbox} but logs at info level
- * (this is an intentional shutdown rather than a recovery).
- */
+/** Best-effort shutdown. Safe to call multiple times or when never started. */
 export async function closeSandbox(): Promise<void> {
   const pending = sandboxPromise;
   sandboxPromise = null;
-  if (!pending) return;
-  try {
-    const sandbox = await pending;
-    if (sandbox && sandbox.isRunning) {
-      log.info("Closing Deno sandbox", { id: sandbox.id });
-      await sandbox.close();
-    }
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    log.warn("sandbox.close() failed", { error: message });
-  }
+  const sandbox = await pending?.catch(() => null);
+  await sandbox?.close();
 }
 
-function registerCleanup(): void {
-  if (cleanupRegistered) return;
-  cleanupRegistered = true;
-
-  const onSignal = (signal: NodeJS.Signals) => {
-    log.info(`Received ${signal} – shutting down sandbox`);
-    void closeSandbox().finally(() => {
-      // Re-raise so the rest of the process exits with the conventional code.
-      process.kill(process.pid, signal);
-    });
-    process.removeListener("SIGINT", onSignal);
-    process.removeListener("SIGTERM", onSignal);
-  };
-
-  process.once("SIGINT", onSignal);
-  process.once("SIGTERM", onSignal);
-  process.once("beforeExit", () => {
-    void closeSandbox();
-  });
+async function walkFiles(dir: string): Promise<string[]> {
+  let entries: Dirent[];
+  try {
+    entries = await readdir(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const files: string[] = [];
+  for (const entry of entries) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) files.push(...(await walkFiles(full)));
+    else if (entry.isFile() && entry.name !== ".gitkeep") files.push(full);
+  }
+  return files.sort((a, b) => a.localeCompare(b));
 }

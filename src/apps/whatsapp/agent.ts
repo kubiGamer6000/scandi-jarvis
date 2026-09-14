@@ -5,7 +5,7 @@ import { definition as jarvisDef } from "../../agents/jarvis/index.js";
 import { buildAgent } from "../../core/agent.js";
 import { env } from "../../core/env.js";
 import { createLogger } from "../../core/logger.js";
-import { getSandbox, isSandboxConfigured } from "../../core/sandbox.js";
+import { getSandbox } from "../../core/sandbox.js";
 import { createWhatsappRateLimitMiddleware } from "../../core/wa-rate-limit.js";
 import { createRevolutTools } from "../../tools/revolut/index.js";
 import { createWhatsappTools, WhatsappContextSchema } from "../../tools/whatsapp/index.js";
@@ -36,22 +36,12 @@ export interface BuildWhatsappAgentOptions {
  * Jarvis. The runner stitches in per-run context as a HumanMessage prefix.
  */
 export async function buildWhatsappAgent(opts: BuildWhatsappAgentOptions) {
-  // Share the agent's Deno sandbox (when configured) with the WA file tools so
-  // that `whatsapp_pull_file` writes land where `write_file` / `execute` see
-  // them, and `whatsapp_send_file` reads files the agent just wrote via the
-  // shell (`execute mkdir -p … && cat > /home/app/wa-out/…`). Without this
-  // they default to a separate StateBackend and the agent's sandbox-written
-  // files look "not found" to the uploader.
-  //
-  // We pass `getSandbox` as a *callable* (not the boot-time instance) so
-  // send-file re-fetches a fresh, health-probed handle each run. Long-lived
-  // WA servers routinely outlive their underlying Deno sandbox; without this
-  // a single sandbox blip permanently breaks file sends until restart.
-  const sandbox = isSandboxConfigured() ? await getSandbox() : null;
-  const waTools = createWhatsappTools(
-    opts.client,
-    sandbox ? { backend: sandbox, getSandbox } : {},
-  );
+  // Share the agent's sandbox with the WA file tools so `whatsapp_pull_file`
+  // writes land where `read_file` / `execute` see them, and
+  // `whatsapp_send_file` can send files the agent built with the shell.
+  // The sandbox object survives provider restarts, so capturing it is safe.
+  const sandbox = await getSandbox();
+  const waTools = createWhatsappTools(opts.client, sandbox ? { sandbox } : {});
 
   // Revolut tools are opt-in: they need both env vars to point at the
   // scandi-revolut-expenses HTTP API. If either is missing we skip them
@@ -66,7 +56,7 @@ export async function buildWhatsappAgent(opts: BuildWhatsappAgentOptions) {
     waTools: waTools.map((t: StructuredTool) => t.name),
     revolutTools: revolutTools.map((t: StructuredTool) => t.name),
     baseTools: jarvisDef.tools.map((t) => t.name),
-    file_backend: sandbox ? `deno:${sandbox.id}` : "state",
+    file_backend: sandbox ? sandbox.describe() : "state",
     revolut_enabled: revolutEnabled,
   });
 

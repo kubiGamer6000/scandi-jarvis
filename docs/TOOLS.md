@@ -4,7 +4,7 @@ Custom tools live under `src/tools/<domain>/<name>.ts` and are indexed by stable
 
 > Built-in deepagents tools (`write_todos`, `ls`, `read_file`, `write_file`, `edit_file`, `glob`, `grep`, `task`) are added automatically by the harness — they don't appear here.
 >
-> The `execute` shell tool is added automatically too, but **only when the agent's backend is a sandbox**. With `DENO_DEPLOY_TOKEN` set, every agent (and inherited subagents) gets it; without the token, the agent runs on `StateBackend` and has no shell. See [DEVELOPMENT.md → Sandbox](./DEVELOPMENT.md#sandbox-shell--executable-skills).
+> The `execute` shell tool is added automatically too, but **only when the agent's backend is a sandbox**. With `JARVIS_SANDBOX_PROVIDER=local` (the default) or `deno`, every agent (and inherited subagents) gets it; with `none`, or if no sandbox provider could start, the agent runs on `StateBackend` and has no shell. See [DEVELOPMENT.md → Sandbox](./DEVELOPMENT.md#sandbox-shell--executable-skills).
 
 ## Active tools
 

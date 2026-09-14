@@ -34,7 +34,7 @@ function summarise(output: string, maxLines = 20): string {
 
 async function main() {
   if (!isSandboxConfigured()) {
-    console.error("DENO_DEPLOY_TOKEN not set");
+    console.error("no sandbox available (JARVIS_SANDBOX_PROVIDER=none or setup missing)");
     process.exit(1);
   }
 
