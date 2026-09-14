@@ -15,6 +15,7 @@ const RATE_LIMITED_TOOLS = new Set([
   "whatsapp_react",
   "whatsapp_edit_message",
   "whatsapp_send_file",
+  "revolut_send_expense_report",
 ]);
 
 export interface WhatsappRateLimitOptions {
@@ -34,8 +35,7 @@ export interface WhatsappRateLimitOptions {
  * - Per-run pacing: enforces `minIntervalMs` between two calls by sleeping
  *   inside the wrap. Cheap to implement and avoids spamming.
  *
- * State is per-run (per agent invocation) via a closure over `runId` extracted
- * from `runtime.config.runId`, falling back to `runtime.toolCallId` if absent.
+ * State is per run, keyed on the thread id plus the triggering message seq.
  */
 export function createWhatsappRateLimitMiddleware(
   options: WhatsappRateLimitOptions = {},
@@ -67,10 +67,16 @@ export function createWhatsappRateLimitMiddleware(
         return handler(request);
       }
 
-      const runId =
-        (request.runtime as { config?: { runId?: string } }).config?.runId ??
-        request.toolCall.id ??
-        "unknown-run";
+      // One agent run = one (thread, triggering message) pair. The tool
+      // runtime carries no run id, and keying on the tool call id (unique per
+      // call) meant the counter never went past 1.
+      const runtime = request.runtime as {
+        configurable?: { thread_id?: string };
+        context?: { triggeringSeq?: number };
+      };
+      const runId = `${runtime.configurable?.thread_id ?? "no-thread"}:${
+        runtime.context?.triggeringSeq ?? "no-trigger"
+      }`;
       const now = Date.now();
       const entry = counters.get(runId) ?? {
         count: 0,

@@ -9,6 +9,8 @@ import type { WhatsappAgent } from "./agent.js";
 import type { WhatsappClient } from "./client.js";
 import { buildContext } from "./context.js";
 import { waitForMessageMedia } from "./media-wait.js";
+import { acquireSession, completeSessionRun } from "./sessions.js";
+import { scheduleSummaryRefresh } from "./summaries.js";
 import { startTypingIndicator } from "./typing.js";
 import type { MessagePayload } from "./types.js";
 
@@ -44,9 +46,27 @@ export interface RunOutcome {
   messageCount: number;
   /** Total wall time. */
   durationMs: number;
+  /** Token usage summed over this run's model calls (main agent only). */
+  usage: RunUsage;
   /** Optional error if the invoke threw (non-abort). */
   error?: string;
 }
+
+export interface RunUsage {
+  model_calls: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+}
+
+const EMPTY_USAGE: RunUsage = {
+  model_calls: 0,
+  input_tokens: 0,
+  output_tokens: 0,
+  cache_read_tokens: 0,
+  cache_write_tokens: 0,
+};
 
 /**
  * Naive single-shot runner. Builds the per-run context, invokes the agent,
@@ -113,14 +133,18 @@ async function executeRun(opts: RunOptions): Promise<RunOutcome> {
       toolCallCounts: {},
       messageCount: 0,
       durationMs: Date.now() - t0,
+      usage: EMPTY_USAGE,
     };
   }
+
+  const { session, isNew: newSession } = acquireSession(opts.chatJid);
 
   const built = await buildContext({
     client: opts.client,
     chatJid: opts.chatJid,
     triggeringSeq: opts.triggeringSeq,
     triggeringMessage: triggerFresh,
+    sinceSeq: newSession ? 0 : session.lastSeenSeq,
     ...(opts.signal ? { signal: opts.signal } : {}),
   });
 
@@ -131,18 +155,16 @@ async function executeRun(opts: RunOptions): Promise<RunOutcome> {
     ...(opts.self?.accountId ? { accountId: opts.self.accountId } : {}),
     ...(opts.self?.pnJid ? { selfPnJid: opts.self.pnJid } : {}),
     ...(opts.self?.lidJid ? { selfLidJid: opts.self.lidJid } : {}),
-    // Disable DeepAgents' auto Anthropic prompt-caching middleware. With our
-    // long system prompt + chat-context HumanMessage + tools schema +
-    // multiple historical turns, the auto-placer routinely tries to put more
-    // than the Anthropic-mandated cap of 4 `cache_control` markers per
-    // request, which 400s the run. We trade a tiny bit of cache reuse for
-    // reliability. The remaining inline marker from
-    // `createCacheBreakpointMiddleware` (1, on the system message) is fine.
-    enableCaching: false,
-  } as WhatsappContext & { enableCaching: false };
+  };
 
+  // Prompt caching stays on (DeepAgents' Anthropic caching middleware): the
+  // session thread is an append-only prefix, so every model call after the
+  // first reads the system prompt, tools and earlier turns from cache.
   log.info("invoke", {
     ...built.meta,
+    thread_id: session.threadId,
+    session_run: session.runs + 1,
+    prep_ms: Date.now() - t0,
     self_pn: context.selfPnJid,
   });
 
@@ -158,7 +180,7 @@ async function executeRun(opts: RunOptions): Promise<RunOutcome> {
     metadata: Record<string, unknown>;
     callbacks: BaseCallbackHandler[];
   } = {
-    configurable: { thread_id: opts.chatJid },
+    configurable: { thread_id: session.threadId },
     context,
     tags: [
       "frontend:whatsapp",
@@ -206,17 +228,37 @@ async function executeRun(opts: RunOptions): Promise<RunOutcome> {
   }
 
   const toolCallCounts: Record<string, number> = {};
+  const usage: RunUsage = { ...EMPTY_USAGE };
   let sentMessage = false;
   let finalAiText: string | null = null;
 
   if (result?.messages && Array.isArray(result.messages)) {
-    for (const m of result.messages) {
+    // The thread holds earlier runs of this session too — only look at what
+    // this run added (everything after our input message).
+    const inputIdx = result.messages.findIndex(
+      (m) => (m as { id?: string } | null)?.id === built.message.id,
+    );
+    const thisRun = inputIdx >= 0 ? result.messages.slice(inputIdx + 1) : result.messages;
+    for (const m of thisRun) {
       if (!m || typeof m !== "object") continue;
       const obj = m as {
         tool_calls?: Array<{ name?: string }>;
         _getType?: () => string;
         content?: unknown;
+        usage_metadata?: {
+          input_tokens?: number;
+          output_tokens?: number;
+          input_token_details?: { cache_read?: number; cache_creation?: number };
+        };
       };
+      if (obj.usage_metadata) {
+        const u = obj.usage_metadata;
+        usage.model_calls += 1;
+        usage.input_tokens += u.input_tokens ?? 0;
+        usage.output_tokens += u.output_tokens ?? 0;
+        usage.cache_read_tokens += u.input_token_details?.cache_read ?? 0;
+        usage.cache_write_tokens += u.input_token_details?.cache_creation ?? 0;
+      }
       if (Array.isArray(obj.tool_calls)) {
         for (const tc of obj.tool_calls) {
           if (!tc?.name) continue;
@@ -225,7 +267,7 @@ async function executeRun(opts: RunOptions): Promise<RunOutcome> {
         }
       }
     }
-    finalAiText = lastAiText(result.messages);
+    finalAiText = lastAiText(thisRun);
   }
 
   // Safety net (Phase 4.23): if the agent finished a normal run but never
@@ -261,6 +303,14 @@ async function executeRun(opts: RunOptions): Promise<RunOutcome> {
     }
   }
 
+  completeSessionRun(opts.chatJid, session, {
+    ok: !error,
+    // An aborted run may not have checkpointed its input; let the restart
+    // re-render those messages rather than risk skipping them.
+    lastSeenSeq: aborted ? session.lastSeenSeq : built.meta.last_seq,
+  });
+  if (!aborted) scheduleSummaryRefresh(opts.client, opts.chatJid);
+
   const durationMs = Date.now() - t0;
   log.info("run complete", {
     chat_jid: opts.chatJid,
@@ -269,6 +319,7 @@ async function executeRun(opts: RunOptions): Promise<RunOutcome> {
     sent_message: sentMessage,
     fallback_sent: fallbackSent,
     tool_call_counts: toolCallCounts,
+    usage,
     duration_ms: durationMs,
   });
 
@@ -280,6 +331,7 @@ async function executeRun(opts: RunOptions): Promise<RunOutcome> {
     toolCallCounts,
     messageCount: Array.isArray(result?.messages) ? result.messages.length : 0,
     durationMs,
+    usage,
     ...(error ? { error } : {}),
   };
 }

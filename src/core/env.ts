@@ -13,7 +13,21 @@ import { z } from "zod";
 const EnvSchema = z.object({
   // --- model ---------------------------------------------------------------
   ANTHROPIC_API_KEY: z.string().optional(),
-  JARVIS_MODEL: z.string().min(1).default("anthropic:claude-opus-4-6"),
+  JARVIS_MODEL: z.string().min(1).default("anthropic:claude-opus-5"),
+  // Thinking depth / token spend for Claude models. Unset = API default
+  // (`high`). Lower is faster and cheaper on routine turns.
+  JARVIS_EFFORT: z.preprocess(
+    (v) => (v === "" ? undefined : v),
+    z.enum(["low", "medium", "high", "xhigh", "max"]).optional(),
+  ),
+  // Opus fast mode: ~2.5x faster output at 2x token price (Claude API only).
+  JARVIS_FAST_MODE: z
+    .union([z.literal("true"), z.literal("false")])
+    .default("false"),
+  // Server-side refusal fallbacks on Opus 5 / Fable (see core/models.ts).
+  JARVIS_REFUSAL_FALLBACK: z
+    .union([z.literal("true"), z.literal("false")])
+    .default("true"),
   // Optional. Newer Claude models (Opus 4.7+ / Sonnet 5+) reject non-default
   // sampling params with HTTP 400 — leave unset to omit temperature entirely.
   JARVIS_TEMPERATURE: z.preprocess(
@@ -95,15 +109,24 @@ const EnvSchema = z.object({
   // Quiet-window before triggering a run after the last inbound message
   // arrives (resets on every new message in the same chat). Tunes how
   // aggressively rapid follow-ups get coalesced into one run.
-  JARVIS_WA_DEBOUNCE_MS: z.coerce.number().int().min(0).default(5000),
+  JARVIS_WA_DEBOUNCE_MS: z.coerce.number().int().min(0).default(2500),
+  // A chat's agent thread (the conversation the model sees, prompt-cached)
+  // is reused across runs until the chat has been quiet this long, or it has
+  // served this many runs. Then a fresh thread starts from summaries + notes
+  // + the recent transcript. Keeps every model call small and cache-friendly.
+  JARVIS_WA_SESSION_IDLE_MIN: z.coerce.number().int().min(1).default(45),
+  JARVIS_WA_SESSION_MAX_RUNS: z.coerce.number().int().min(1).default(15),
+  // Chat summaries refresh in the background once a chat has been quiet this
+  // long after a run (never inline before a reply).
+  JARVIS_SUMMARY_IDLE_MS: z.coerce.number().int().min(0).default(120_000),
   // Max time we wait for `message.processed` on a media message before
   // proceeding with whatever's available.
   JARVIS_WA_MEDIA_WAIT_MS: z.coerce.number().int().min(0).default(60000),
   // How many recent messages (per chat) to inject into the context block.
   JARVIS_WA_CONTEXT_MSGS: z.coerce.number().int().min(1).max(100).default(30),
   // Model used for chat summarisation (daily / weekly / long-term). Generous
-  // token budget; default Claude Sonnet 4.6.
-  JARVIS_SUMMARY_MODEL: z.string().min(1).default("anthropic:claude-sonnet-4-6"),
+  // token budget; default Claude Sonnet 5. Runs in the background.
+  JARVIS_SUMMARY_MODEL: z.string().min(1).default("anthropic:claude-sonnet-5"),
   // Postgres connection string. Hosted Supabase Postgres works; we also use it
   // for the langgraph-checkpoint-postgres saver. Required for the WA app
   // (the CLI still works without it).

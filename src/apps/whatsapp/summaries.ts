@@ -27,38 +27,40 @@ interface SummaryRow {
 }
 
 /**
- * Per-summary refresh policy. Lazy-refresh fires from `context.ts` when the
- * existing summary is older than `maxAgeMs` OR is more than `maxLagMessages`
- * messages behind the head of the chat.
+ * Per-summary refresh policy. A summary is rewritten when enough new messages
+ * have piled up since its watermark, or when it's old and anything new exists.
+ * Small gaps don't matter: the reply path always includes the recent
+ * transcript on top of the summaries.
  *
- * Token ceilings are budgets we pass to the LLM, not hard limits — the model
- * may produce slightly more/less depending on input density.
+ * Token ceilings are budgets we pass to the LLM, not hard limits.
  */
 interface SummaryPolicy {
+  /** Refresh once at least this many new messages exist… */
+  minNewMessages: number;
+  /** …or once the summary is older than this and has any new message. */
   maxAgeMs: number;
-  maxLagMessages: number;
   /** Max messages to fetch when building the prompt (paginated). */
   fetchLimit: number;
-  /** Output token ceiling (passed in the prompt; Sonnet honours this well). */
+  /** Output token ceiling (passed in the prompt). */
   outputTokenCeiling: number;
 }
 
 const POLICIES: Record<SummaryKind, SummaryPolicy> = {
   daily: {
-    maxAgeMs: 60 * 60 * 1000, // 1h
-    maxLagMessages: 50,
+    minNewMessages: 15,
+    maxAgeMs: 3 * 60 * 60 * 1000, // 3h
     fetchLimit: 400,
     outputTokenCeiling: 800,
   },
   weekly: {
-    maxAgeMs: 6 * 60 * 60 * 1000, // 6h
-    maxLagMessages: 200,
+    minNewMessages: 60,
+    maxAgeMs: 24 * 60 * 60 * 1000, // 24h
     fetchLimit: 1500,
     outputTokenCeiling: 1500,
   },
   longterm: {
+    minNewMessages: 300,
     maxAgeMs: 7 * 24 * 60 * 60 * 1000, // 7d
-    maxLagMessages: 1000,
     fetchLimit: 5000,
     outputTokenCeiling: 2500,
   },
@@ -136,47 +138,12 @@ async function saveSummary(
      on conflict (chat_jid) do update set
        ${col[0]} = excluded.${col[0]},
        ${col[1]} = excluded.${col[1]},
-       ${col[2]} = excluded.${col[2]}`,
+       ${col[2]} = excluded.${col[2]}
+     -- Never move a watermark backwards (a slower concurrent refresh).
+     where jarvis.chat_context.${col[2]} is null
+        or jarvis.chat_context.${col[2]} < excluded.${col[2]}`,
     [chatJid, summary, throughSeq],
   );
-}
-
-function isStale(
-  row: SummaryRow | null,
-  kind: SummaryKind,
-  policy: SummaryPolicy,
-  headSeq: number | null,
-): boolean {
-  if (!row) return true;
-  const updatedAt =
-    kind === "daily"
-      ? row.daily_updated_at
-      : kind === "weekly"
-        ? row.weekly_updated_at
-        : row.longterm_updated_at;
-  const throughSeq =
-    kind === "daily"
-      ? row.daily_through_seq
-      : kind === "weekly"
-        ? row.weekly_through_seq
-        : row.longterm_through_seq;
-  const summary =
-    kind === "daily"
-      ? row.daily_summary
-      : kind === "weekly"
-        ? row.weekly_summary
-        : row.longterm_summary;
-  if (!summary) return true;
-  if (!updatedAt) return true;
-  if (Date.now() - updatedAt.getTime() > policy.maxAgeMs) return true;
-  if (
-    headSeq !== null &&
-    throughSeq !== null &&
-    headSeq - throughSeq > policy.maxLagMessages
-  ) {
-    return true;
-  }
-  return false;
 }
 
 async function fetchSince(
@@ -263,71 +230,59 @@ async function refresh(
 ): Promise<RefreshResult> {
   const policy = { ...POLICIES[kind], ...(opts.policy ?? {}) };
 
-  // Head-seq probe (cheap; 1 message).
-  let headSeq: number | null = null;
-  try {
-    const head = await opts.client.fetchMessages(
-      opts.chatJid,
-      { limit: 1 },
-      opts.signal ? { signal: opts.signal } : {},
-    );
-    headSeq = head.messages[0]?.seq ?? null;
-  } catch (err) {
-    log.warn("head probe failed", {
-      chat_jid: opts.chatJid,
-      kind,
-      error: err instanceof Error ? err.message : String(err),
-    });
-  }
-
   const row = await loadRow(opts.chatJid);
-  if (!opts.force && !isStale(row, kind, policy, headSeq)) {
-    return {
-      changed: false,
-      summary:
-        (kind === "daily"
-          ? row?.daily_summary
-          : kind === "weekly"
-            ? row?.weekly_summary
-            : row?.longterm_summary) ?? "",
-      through_seq:
-        (kind === "daily"
-          ? row?.daily_through_seq
-          : kind === "weekly"
-            ? row?.weekly_through_seq
-            : row?.longterm_through_seq) ?? 0,
-      reason: "fresh",
-    };
-  }
-
   const prevSummary =
-    kind === "daily"
+    (kind === "daily"
       ? row?.daily_summary
       : kind === "weekly"
         ? row?.weekly_summary
-        : row?.longterm_summary;
+        : row?.longterm_summary) ?? null;
   const prevThroughSeq =
-    (kind === "daily"
-      ? row?.daily_through_seq
+    Number(
+      kind === "daily"
+        ? row?.daily_through_seq
+        : kind === "weekly"
+          ? row?.weekly_through_seq
+          : row?.longterm_through_seq,
+    ) || 0;
+  const updatedAt =
+    kind === "daily"
+      ? row?.daily_updated_at
       : kind === "weekly"
-        ? row?.weekly_through_seq
-        : row?.longterm_through_seq) ?? 0;
+        ? row?.weekly_updated_at
+        : row?.longterm_updated_at;
 
-  const newMessages = await fetchSince(
+  const age = updatedAt ? Date.now() - updatedAt.getTime() : Number.POSITIVE_INFINITY;
+  const dueRegardless = Boolean(opts.force) || !prevSummary || age > policy.maxAgeMs;
+
+  // Message seqs are global across chats, so staleness is measured by
+  // fetching this chat's messages past the watermark, not by seq arithmetic.
+  // When only the message count can make it due, fetch just enough to tell.
+  const probeLimit = dueRegardless ? policy.fetchLimit : policy.minNewMessages;
+  let newMessages = await fetchSince(
     opts.client,
     opts.chatJid,
     prevThroughSeq,
-    policy.fetchLimit,
+    probeLimit,
     opts.signal,
   );
 
-  if (newMessages.length === 0) {
-    return {
-      changed: false,
-      summary: prevSummary ?? "",
-      through_seq: prevThroughSeq,
-      reason: "no-new-messages",
-    };
+  const unchanged = (reason: RefreshResult["reason"]): RefreshResult => ({
+    changed: false,
+    summary: prevSummary ?? "",
+    through_seq: prevThroughSeq,
+    reason,
+  });
+  if (newMessages.length === 0) return unchanged("no-new-messages");
+  if (!dueRegardless && newMessages.length < policy.minNewMessages) return unchanged("fresh");
+  if (probeLimit < policy.fetchLimit) {
+    newMessages = await fetchSince(
+      opts.client,
+      opts.chatJid,
+      prevThroughSeq,
+      policy.fetchLimit,
+      opts.signal,
+    );
   }
 
   log.info("refreshing summary", {
@@ -335,12 +290,11 @@ async function refresh(
     kind,
     new_messages: newMessages.length,
     prev_through_seq: prevThroughSeq,
-    head_seq: headSeq,
   });
 
   let updated: string;
   try {
-    updated = await llmUpdateSummary(kind, prevSummary ?? null, newMessages, policy, opts.signal);
+    updated = await llmUpdateSummary(kind, prevSummary, newMessages, policy, opts.signal);
   } catch (err) {
     log.warn("llm update failed; keeping previous summary", {
       chat_jid: opts.chatJid,
@@ -378,18 +332,65 @@ export function refreshLongTermIfStale(opts: RefreshOptions): Promise<RefreshRes
 }
 
 /**
- * Run all three refreshes for a chat. The runner calls this inline before
- * building the prompt context; the cron worker calls it (with `force`) every
- * hour for active chats.
+ * Run all three refreshes for a chat. They touch separate columns, so they
+ * run concurrently. Called by the background scheduler below and the cron.
  */
 export async function refreshAllIfStale(
   opts: RefreshOptions,
 ): Promise<{ daily: RefreshResult; weekly: RefreshResult; longterm: RefreshResult }> {
-  // Sequential — the cheap loadRow makes each refresh quick when nothing's stale,
-  // and serialising avoids two concurrent llm calls (which would both pay tokens
-  // for the same window).
-  const daily = await refreshDailyIfStale(opts);
-  const weekly = await refreshWeeklyIfStale(opts);
-  const longterm = await refreshLongTermIfStale(opts);
+  const [daily, weekly, longterm] = await Promise.all([
+    refreshDailyIfStale(opts),
+    refreshWeeklyIfStale(opts),
+    refreshLongTermIfStale(opts),
+  ]);
   return { daily, weekly, longterm };
+}
+
+// ---------------------------------------------------------------------------
+// Background scheduling
+// ---------------------------------------------------------------------------
+
+const pendingRefresh = new Map<string, NodeJS.Timeout>();
+const runningRefresh = new Set<string>();
+
+/**
+ * Refresh a chat's summaries in the background once it has been quiet for
+ * `JARVIS_SUMMARY_IDLE_MS`. Each new call resets the timer, so an active
+ * conversation is summarised once it pauses, never in the middle of a reply.
+ * At most one refresh per chat runs at a time.
+ */
+export function scheduleSummaryRefresh(client: WhatsappClient, chatJid: string): void {
+  if (!getPool()) return;
+  const existing = pendingRefresh.get(chatJid);
+  if (existing) clearTimeout(existing);
+
+  const timer = setTimeout(() => {
+    pendingRefresh.delete(chatJid);
+    if (runningRefresh.has(chatJid)) {
+      scheduleSummaryRefresh(client, chatJid);
+      return;
+    }
+    runningRefresh.add(chatJid);
+    const t0 = Date.now();
+    refreshAllIfStale({ client, chatJid })
+      .then((r) => {
+        const changed = (Object.keys(r) as SummaryKind[]).filter((k) => r[k].changed);
+        if (changed.length > 0) {
+          log.info("background summary refresh done", {
+            chat_jid: chatJid,
+            changed,
+            duration_ms: Date.now() - t0,
+          });
+        }
+      })
+      .catch((err) =>
+        log.warn("background summary refresh failed", {
+          chat_jid: chatJid,
+          error: err instanceof Error ? err.message : String(err),
+        }),
+      )
+      .finally(() => runningRefresh.delete(chatJid));
+  }, env.JARVIS_SUMMARY_IDLE_MS);
+  timer.unref();
+  pendingRefresh.set(chatJid, timer);
 }

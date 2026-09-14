@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import { HumanMessage } from "@langchain/core/messages";
 
 import { getPool } from "../../core/db.js";
@@ -6,7 +8,6 @@ import { createLogger } from "../../core/logger.js";
 
 import type { WhatsappClient } from "./client.js";
 import { waitForRecentMedia } from "./media-wait.js";
-import { refreshAllIfStale } from "./summaries.js";
 import { formatMessageLine } from "./transcript.js";
 import { normaliseChatType, type MessagePayload } from "./types.js";
 
@@ -29,6 +30,12 @@ export interface BuildContextOptions {
   triggeringMessage?: MessagePayload | null;
   /** When false, skip the summaries fetch entirely (used by tests / cron). */
   includeSummaries?: boolean;
+  /**
+   * Continuing an existing agent session: only messages with a seq above
+   * this are rendered (the thread already holds everything before), and the
+   * summaries / notes are skipped. 0 or unset = full context.
+   */
+  sinceSeq?: number;
   /** When false, skip media-wait polling (used by tests / cron). */
   waitForMedia?: boolean;
   /** Forwarded to media-wait + nested fetches. */
@@ -50,6 +57,10 @@ export interface BuiltContext {
     has_weekly_summary: boolean;
     has_longterm_summary: boolean;
     notes_len: number;
+    /** "full" for a session's first run, "delta" when continuing one. */
+    mode: "full" | "delta";
+    /** Highest seq in the rendered window (feeds the next delta). */
+    last_seq: number;
   };
   /** The triggering message in case the runner needs to inspect it further. */
   triggeringMessage: MessagePayload | null;
@@ -88,44 +99,55 @@ export async function buildContext(
   opts: BuildContextOptions,
 ): Promise<BuiltContext> {
   const recentLimit = opts.recentLimit ?? env.JARVIS_WA_CONTEXT_MSGS;
-  const includeSummaries = opts.includeSummaries ?? true;
+  const sinceSeq = opts.sinceSeq ?? 0;
+  const mode: "full" | "delta" = sinceSeq > 0 ? "delta" : "full";
+  const includeSummaries = (opts.includeSummaries ?? true) && mode === "full";
 
-  // 1. Triggering message (so we know who/what kicked this off).
-  let trigger = opts.triggeringMessage ?? null;
-  if (!trigger) {
-    try {
-      trigger = await opts.client.getMessage(opts.triggeringSeq);
-    } catch (err) {
-      log.warn("getMessage(triggering) failed", {
-        seq: opts.triggeringSeq,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
+  // Everything below is independent I/O — fetch it concurrently. Summaries
+  // are read as-is: they're refreshed in the background (summaries.ts), never
+  // on the reply path.
+  const [trigger, recentRaw, row] = await Promise.all([
+    // 1. Triggering message (so we know who/what kicked this off).
+    opts.triggeringMessage
+      ? Promise.resolve(opts.triggeringMessage)
+      : opts.client.getMessage(opts.triggeringSeq).catch((err) => {
+          log.warn("getMessage(triggering) failed", {
+            seq: opts.triggeringSeq,
+            error: err instanceof Error ? err.message : String(err),
+          });
+          return null;
+        }),
+    // 2. Recent transcript window (before AND including the triggering seq).
+    // The bot returns these newest-first when paged with `before_seq`; we
+    // want oldest-first in the prompt.
+    opts.client
+      .fetchMessages(opts.chatJid, {
+        before_seq: opts.triggeringSeq + 1, // inclusive of trigger
+        limit: recentLimit,
+        include_media: true,
+        include_reactions: true,
+        include_tombstones: false,
+      })
+      .then((res) => (res.ascending ? res.messages : [...res.messages].reverse()))
+      .catch((err) => {
+        log.warn("fetchMessages(recent) failed", {
+          chat_jid: opts.chatJid,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        return [] as MessagePayload[];
+      }),
+    // 3. Persistent context (summaries + notes).
+    includeSummaries ? loadChatContextRow(opts.chatJid) : Promise.resolve(null),
+  ]);
 
-  // 2. Recent transcript window (before AND including the triggering seq).
-  // The bot returns these newest-first (`ascending: false`) when paged with
-  // `before_seq`. We want oldest-first in the prompt so the model reads top→
-  // bottom in chronological order — reverse the array here.
-  let recent: MessagePayload[] = [];
-  try {
-    const res = await opts.client.fetchMessages(opts.chatJid, {
-      before_seq: opts.triggeringSeq + 1, // inclusive of trigger
-      limit: recentLimit,
-      include_media: true,
-      include_reactions: true,
-      include_tombstones: false,
-    });
-    recent = res.ascending ? res.messages : [...res.messages].reverse();
-  } catch (err) {
-    log.warn("fetchMessages(recent) failed", {
-      chat_jid: opts.chatJid,
-      error: err instanceof Error ? err.message : String(err),
-    });
-  }
+  // In a continuing session the thread already has everything up to
+  // `sinceSeq`; only render what's new.
+  let recent = mode === "delta" ? recentRaw.filter((m) => m.seq > sinceSeq) : recentRaw;
+  const possiblyTruncated =
+    mode === "delta" && recentRaw.length >= recentLimit && (recentRaw[0]?.seq ?? 0) > sinceSeq;
 
-  // 2a. Wait for any unprocessed media in the recent window. The runner already
-  // waited on the trigger; this catches things like a voice note 2 messages back
+  // 2a. Wait for any unprocessed media in the window. The runner already
+  // waited on the trigger; this catches e.g. a voice note 2 messages back
   // that hasn't been transcribed yet.
   if (opts.waitForMedia !== false && recent.length > 0) {
     try {
@@ -141,26 +163,6 @@ export async function buildContext(
       }
     }
   }
-
-  // 3. Lazy-refresh summaries before reading them. The functions are no-ops
-  // when summaries are fresh, so the happy path is just three quick row checks.
-  if (includeSummaries) {
-    try {
-      await refreshAllIfStale({
-        client: opts.client,
-        chatJid: opts.chatJid,
-        ...(opts.signal ? { signal: opts.signal } : {}),
-      });
-    } catch (err) {
-      log.warn("refreshAllIfStale failed (continuing without)", {
-        chat_jid: opts.chatJid,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
-
-  // 4. Read persistent context (summaries + notes).
-  const row = includeSummaries ? await loadChatContextRow(opts.chatJid) : null;
 
   // Compose the prompt block. The bot may return non-canonical chat.type
   // values (e.g. "lid" for LID-addressed DMs) — normalise to the {dm,group}
@@ -207,7 +209,16 @@ export async function buildContext(
     parts.push(`## Chat notes (your AGENTS.md for this chat)\n${row.notes.trim()}`);
   }
 
-  if (recent.length > 0) {
+  if (mode === "delta") {
+    const lines = recent.map(formatMessageLine).join("\n");
+    parts.push(
+      `## New messages since your last turn (${recent.length}, oldest first)\n` +
+        (possiblyTruncated
+          ? "(more messages arrived than shown — use `whatsapp_fetch_messages` if you need the earlier ones)\n"
+          : "") +
+        (lines || "(none besides the trigger)"),
+    );
+  } else if (recent.length > 0) {
     const lines = recent.map(formatMessageLine).join("\n");
     parts.push(`## Recent transcript (last ${recent.length}, oldest first)\n${lines}`);
   } else {
@@ -216,14 +227,15 @@ export async function buildContext(
 
   parts.push(`## Triggering message\n${triggerLine}`);
 
-  parts.push(
+  if (mode === "full") parts.push(
     "## What to do\n" +
       "Decide whether and how to respond. Use `whatsapp_send_message` to reply (the user only sees those — your AIMessage text is internal). " +
       "Use other WhatsApp tools as needed (`whatsapp_react`, `whatsapp_pull_file`, `whatsapp_remember`, etc.). " +
       "When you're done, end the turn (no final AIMessage required).",
   );
+  else parts.push("## What to do\nSame as before: reply with WhatsApp tools, then end the turn.");
 
-  const message = new HumanMessage({ content: parts.join("\n\n") });
+  const message = new HumanMessage({ id: randomUUID(), content: parts.join("\n\n") });
 
   const ownInTranscript = recent.filter((m) => m.from_me).length;
 
@@ -239,6 +251,8 @@ export async function buildContext(
       has_weekly_summary: Boolean(row?.weekly_summary?.trim()),
       has_longterm_summary: Boolean(row?.longterm_summary?.trim()),
       notes_len: row?.notes?.length ?? 0,
+      mode,
+      last_seq: Math.max(opts.triggeringSeq, ...recentRaw.map((m) => m.seq)),
     },
     triggeringMessage: trigger,
   };
