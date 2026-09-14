@@ -14,6 +14,7 @@ import { env, hasCredential } from "./env.js";
 import { createLogger } from "./logger.js";
 import { DenoSandboxProvider, isSandboxClosedError } from "./sandbox-deno.js";
 import { LocalSandbox } from "./sandbox-local.js";
+import { startKitGateway, stopKitGateway } from "../integrations/kit-gateway.js";
 
 const log = createLogger("core/sandbox");
 
@@ -242,6 +243,9 @@ export class JarvisSandbox extends BaseSandbox {
 
   async #getLocal(): Promise<LocalSandbox> {
     if (this.#local?.isRunning) return this.#local;
+    // Scandi data APIs are reachable from the sandbox only via the localhost
+    // kit gateway, which holds the credentials.
+    const gateway = await startKitGateway();
     const local = new LocalSandbox({
       rootDir: path.resolve(process.cwd(), env.JARVIS_SANDBOX_DIR),
       timeoutSec: env.JARVIS_SANDBOX_EXEC_TIMEOUT_SEC,
@@ -249,6 +253,7 @@ export class JarvisSandbox extends BaseSandbox {
       maxFileMb: env.JARVIS_SANDBOX_MAX_FILE_MB,
       network: env.JARVIS_SANDBOX_NETWORK === "true",
       maxConcurrency: env.JARVIS_SANDBOX_MAX_CONCURRENCY,
+      ...(gateway ? { extraEnv: gateway.sandboxEnv } : {}),
     });
     await local.start();
     return (this.#local = local);
@@ -290,6 +295,7 @@ export async function closeSandbox(): Promise<void> {
   sandboxPromise = null;
   const sandbox = await pending?.catch(() => null);
   await sandbox?.close();
+  await stopKitGateway();
 }
 
 async function walkFiles(dir: string): Promise<string[]> {

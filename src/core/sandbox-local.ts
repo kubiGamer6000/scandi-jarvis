@@ -9,6 +9,8 @@ import {
   readlink,
   realpath,
   rm,
+  symlink,
+  writeFile,
 } from "node:fs/promises";
 import path from "node:path";
 
@@ -46,6 +48,8 @@ export interface LocalSandboxOptions {
   network: boolean;
   /** Max commands running at once (the droplet has one vCPU). */
   maxConcurrency: number;
+  /** Extra environment for sandboxed commands (e.g. the kit gateway address). */
+  extraEnv?: Record<string, string>;
 }
 
 /**
@@ -102,6 +106,22 @@ export class LocalSandbox {
    */
   async start(): Promise<void> {
     await mkdir(this.#homeDir, { recursive: true });
+    await mkdir(path.join(this.#homeDir, "workspace", "cache"), { recursive: true });
+    await mkdir(path.join(this.#homeDir, "output"), { recursive: true });
+    // ES module imports ignore NODE_PATH and resolve by walking up from the
+    // importing file, so scripts under /home/app find the preinstalled
+    // packages through /home/app/node_modules.
+    const nodeModules = path.join(this.#toolsDir, "node", "node_modules");
+    const link = path.join(this.#homeDir, "node_modules");
+    if ((await pathExists(nodeModules)) && !(await pathExists(link))) {
+      await symlink(nodeModules, link).catch(() => undefined);
+    }
+    // Scripts under /home/app (the Scandi kit, skills, the agent's own) are
+    // ES modules with top-level await; tsx needs this to treat .ts as ESM.
+    const pkg = path.join(this.#homeDir, "package.json");
+    if (!(await pathExists(pkg))) {
+      await writeFile(pkg, `${JSON.stringify({ private: true, type: "module" }, null, 2)}\n`);
+    }
     // /tmp is scratch: start every process with an empty one.
     await rm(this.#tmpDir, { recursive: true, force: true });
     await mkdir(this.#tmpDir, { recursive: true });
@@ -243,6 +263,7 @@ export class LocalSandbox {
       PYTHONUNBUFFERED: "1",
       PIP_DISABLE_PIP_VERSION_CHECK: "1",
       npm_config_update_notifier: "false",
+      ...this.#opts.extraEnv,
     };
   }
 

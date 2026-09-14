@@ -10,6 +10,7 @@
  * Costs real tokens (a few cents per config). Run:
  *   npm run bench:wa                      # default configs
  *   BENCH_CONFIGS=opus5,opus5-fast npm run bench:wa
+ *   BENCH_TURNS='["how did we do last week?"]' BENCH_SHOW_REPLIES=1 npm run bench:wa
  */
 import { MemorySaver } from "@langchain/langgraph";
 
@@ -34,7 +35,7 @@ const CONFIGS: Record<string, BenchConfig> = {
   "opus5-fast": { model: "anthropic:claude-opus-5", fast: true },
 };
 
-const TURNS = [
+const TURNS: string[] = process.env.BENCH_TURNS ? JSON.parse(process.env.BENCH_TURNS) : [
   "hey jarvis 👋 quick one: what's 18% of 2,450 EUR?",
   "thanks! and what would the total be including that?",
   "perfect. can you draft a 2-sentence thank-you note to a supplier for fast delivery?",
@@ -76,6 +77,7 @@ function fakeClient(chatJid: string, onVisible: () => void): {
     },
     async send(body: { text?: string }) {
       onVisible();
+      if (process.env.BENCH_SHOW_REPLIES) console.log(`   ↳ jarvis: ${body.text}`);
       const m = mk(body.text ?? "", true);
       messages.push(m);
       return { seq: m.seq, wa_id: m.wa_id };

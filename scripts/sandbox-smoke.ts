@@ -65,10 +65,26 @@ async function main(): Promise<void> {
 
   // Skills sync + running a skill script.
   await sandbox.syncDirectory(path.resolve("skills"), "/home/app/skills");
-  const skill = await sandbox.execute(
-    "cd /home/app/skills/jarvis/docx && python3 -c 'import scripts.office.pack' 2>&1 | tail -1; ls /home/app/skills/shopify/shopify-admin/scripts",
+  await sandbox.syncDirectory(path.resolve("kit"), "/home/app/kit");
+  const skill = await sandbox.execute("ls /home/app/skills/jarvis/shopify-admin/scripts /home/app/kit/lib");
+  check(
+    "skills + kit synced into the sandbox",
+    skill.output.includes("validate.mjs") && skill.output.includes("profitApi.ts"),
+    skill,
   );
-  check("skills synced into the sandbox", skill.output.includes("validate.mjs"), skill);
+  const exec = await sandbox.execute("test -x /home/app/skills/jarvis/shopify-admin/scripts/validate.mjs && echo exec-ok");
+  check("skill scripts are executable", exec.output.includes("exec-ok"), exec);
+
+  if (process.env.KIT_SMOKE !== "0") {
+    const kit = await sandbox.execute(
+      "cd /home/app/workspace && tsx /home/app/skills/jarvis/scandi-profit-api/scripts/profit.ts health 2>&1 | tail -3",
+    );
+    check(
+      "kit script reaches the Profit API through the gateway (set KIT_SMOKE=0 to skip)",
+      kit.exitCode === 0 && !/error|not available|not configured/i.test(kit.output),
+      kit,
+    );
+  }
 
   const missing = await sandbox.downloadFiles(["/home/app/does/not/exist"]);
   check("missing file → file_not_found", missing[0]?.error === "file_not_found", missing);
@@ -79,7 +95,7 @@ async function main(): Promise<void> {
     const envDump = await sandbox.execute("env");
     check(
       "no Jarvis secrets in the environment",
-      !/ANTHROPIC|SUPABASE|WA_BOT|TAVILY|COMPOSIO|DENO/.test(envDump.output),
+      !/ANTHROPIC|SUPABASE|WA_BOT|TAVILY|COMPOSIO|DENO|SECRET|API_KEY|APP_TOKEN|CLIENT_ID/.test(envDump.output),
       envDump.output,
     );
 

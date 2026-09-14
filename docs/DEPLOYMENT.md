@@ -16,7 +16,7 @@ What runs in a single Node process (`dist/apps/whatsapp/server.js`):
 - Fastify HTTP server on `127.0.0.1:3000`, route `POST /wa-webhook`
 - Per-chat dispatcher state machine (debounce → run → optional
   hard-interrupt + restart) backed by an in-memory `p-queue`
-- The shared `jarvis-whatsapp` DeepAgent (Anthropic + Composio +
+- The shared `jarvis-whatsapp` DeepAgent (Anthropic + skills +
   sandboxed `execute` shell), checkpointed per chat session
   (`thread_id = <chat-jid>#<start>`) to `langgraph.*` tables in
   Supabase via `PostgresSaver`
@@ -24,6 +24,10 @@ What runs in a single Node process (`dist/apps/whatsapp/server.js`):
 - The local sandbox: each `execute` call is a short-lived `bwrap`
   child process (bubblewrap) inside the same systemd unit, with its
   workspace under `/opt/scandi-jarvis/.sandbox/`
+- The kit gateway: a loopback-only HTTP server on a random port that
+  holds the Scandi data API credentials and forwards read-only calls
+  from the sandboxed `scandi-*` skill scripts (started with the local
+  sandbox, only if some Scandi API is configured)
 
 Optional sidecar:
 
@@ -68,9 +72,13 @@ talks back to the bot over the loopback interface too
 Outbound 443 to:
 
 - `api.anthropic.com` — model calls
-- `backend.composio.dev` (or wherever your Composio org lives) — Shopify
-  tool execution
 - `*.supabase.co` — Postgres (same as the bot)
+- Scandi data APIs, called by the kit gateway (each only if configured):
+  - `<SHOPIFY_STORE_DOMAIN>` — Shopify Admin GraphQL + OAuth token exchange
+  - `graphql.skio.com` — Skio
+  - `graph.facebook.com` — Meta Marketing API
+  - `api.triplewhale.com` — Triple Whale
+  - the host in `PROFIT_API_BASE` — our Profit API
 - `*.deno.com` / `*.deno.dev` — Deno sandbox provisioning + RPC (only if
   `JARVIS_SANDBOX_PROVIDER=deno`)
 - `api.smith.langchain.com` — LangSmith tracing (only if
@@ -81,7 +89,10 @@ All already allowed by the bot's outbound-any rule.
 With the default `JARVIS_SANDBOX_NETWORK=true`, code the agent runs in the
 local sandbox shares the host's network too (`pip install`, `curl`, …),
 including services on `127.0.0.1` — it just doesn't have their tokens.
-Set `JARVIS_SANDBOX_NETWORK=false` if you don't want that.
+The one exception is the kit gateway, whose per-process token the
+sandbox is given so the `scandi-*` skills work (read-only calls only).
+Set `JARVIS_SANDBOX_NETWORK=false` if you don't want that — it also
+takes the Scandi data skills offline.
 
 ---
 
@@ -138,14 +149,60 @@ Recommended optional vars:
 | Var                                                            | Why                                                                                   |
 | -------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
 | `JARVIS_SANDBOX_PROVIDER`                                      | `local` (default) = bubblewrap shell on the droplet, needs §3.2b. `deno` = Deno Deploy (+ `DENO_DEPLOY_TOKEN`, `DENO_DEPLOY_ORG` for personal tokens), falls back to local. `none` = no `execute` tool. |
-| `COMPOSIO_API_KEY` / `COMPOSIO_USER_ID`                        | Required for the Shopify subagent.                                                    |
+| Scandi data API credentials (see §3.2a)                        | Power the `scandi-*` skills (profit, MRR, Shopify, Skio, Meta). Without them Jarvis runs but can't answer numbers questions. |
 | `TAVILY_API_KEY`                                               | Enables Tavily `internet_search` and `tavily_deep_research` (without it both return an error string). |
 | `LANGSMITH_TRACING=true` / `LANGSMITH_API_KEY` / `LANGSMITH_PROJECT` | Trace every run in <https://smith.langchain.com>. Cheap and worth it.            |
 | `LOG_LEVEL`                                                    | `info` in prod, `debug` while debugging.                                              |
 
+| `JARVIS_CONTEXT_WINDOW_TOKENS`                                  | Default `300000`. Long conversations are compacted at ~85% of this (≈255K) instead of ~850K on Opus 5's 1M limit — faster, cheaper calls. Must not exceed the model's limit. |
+
 > The `scandi-jarvis` env loader uses Zod and will **refuse to start**
 > if any required var is missing — you'll see a clear `Invalid
 > environment configuration` error in the journal.
+
+### 3.2a Scandi data API credentials
+
+The `scandi-*` skills read live business data through the kit gateway
+(see [ARCHITECTURE.md → Scandi data](./ARCHITECTURE.md#scandi-data-kit-gateway)).
+The credentials stay in the Jarvis process; the sandbox never sees them.
+Each service switches on only when its vars are set:
+
+| Var                                              | Service       | Notes                                                                                   |
+| ------------------------------------------------ | ------------- | --------------------------------------------------------------------------------------- |
+| `PROFIT_API_BASE` / `PROFIT_API_KEY`             | Profit API    | Our dashboard API. Base URL without `/api`; read-only key.                               |
+| `SHOPIFY_STORE_DOMAIN`                           | Shopify       | The store's Admin domain. Also required for Triple Whale.                               |
+| `SHOPIFY_CLIENT_ID` / `SHOPIFY_CLIENT_SECRET`    | Shopify       | OAuth `client_credentials` app; the gateway exchanges and caches the access token.      |
+| `SHOPIFY_API_VERSION`                            | Shopify       | Default `2026-01`.                                                                      |
+| `SKIO_API_KEY`                                   | Skio          |                                                                                         |
+| `META_APP_TOKEN`                                 | Meta          | Marketing API token.                                                                    |
+| `META_AD_ACCOUNT_IDS`                            | Meta          | Comma-separated ad account ids.                                                         |
+| `META_API_VERSION`                               | Meta          | Default `v25.0`.                                                                        |
+| `TRIPLEWHALE_API_KEY`                            | Triple Whale  | Google + TikTok spend. Needs `SHOPIFY_STORE_DOMAIN` too.                                |
+| `JARVIS_KIT_ALLOW_WRITES`                        | all           | Default `false`: GraphQL mutations and non-GET calls are refused. **Leave it off** — anyone who can message Jarvis can drive it. |
+
+Add them to `.env`, then strip Windows line endings — a `.env` edited
+on Windows once broke Shopify and Triple Whale auth with invisible
+`\r` characters (values are trimmed on load now, but don't rely on it):
+
+```bash
+cd /opt/scandi-jarvis
+sudo -u scandi nano .env
+sudo -u scandi sed -i 's/\r$//' .env
+```
+
+Then check every configured service with a live read (and that writes
+and bad tokens are refused). No LLM calls:
+
+```bash
+sudo -u scandi npm run smoke:kit
+# gateway http://127.0.0.1:… · services: profit, shopify, skio, meta, triplewhale
+# ✅ profit: sync status …
+# …
+# all checks passed
+```
+
+The gateway needs the **local** sandbox (§3.2b): the Deno provider
+can't reach it. Restart the service after changing these vars.
 
 ### 3.2b Sandbox setup
 
@@ -158,13 +215,16 @@ sudo bash scripts/setup-sandbox.sh
 ```
 
 It installs `bubblewrap`, `python3-venv`, `poppler-utils`, `qpdf`,
-`pandoc` and `tesseract-ocr` (add `WITH_LIBREOFFICE=1` for LibreOffice),
+`pandoc`, `tesseract-ocr`, DejaVu + Liberation fonts and LibreOffice
+writer/calc/impress (~400 MB, needed by the xlsx/pptx skills;
+`WITH_LIBREOFFICE=0` skips it),
 adds an AppArmor profile at `/etc/apparmor.d/bwrap` that lets
 `/usr/bin/bwrap` create user namespaces (Ubuntu 24.04 blocks this by
 default via `kernel.apparmor_restrict_unprivileged_userns=1`), creates
 `/opt/scandi-jarvis/.sandbox` owned by `scandi`, and builds the Python
-venv + `node_modules` toolchain as `scandi`. It finishes with a
-bubblewrap self-test.
+venv (incl. `python-pptx`, `markitdown`) + `node_modules` toolchain
+(`tsx` for the kit scripts, `docx`, `pptxgenjs`, `react`, `react-icons`,
+`sharp`, …) as `scandi`. It finishes with a bubblewrap self-test.
 
 To rebuild just the toolchain later (e.g. after adding a package to
 `PY_PACKAGES` in the script), no sudo needed:
@@ -179,6 +239,10 @@ every sandbox start wipes `.sandbox/tmp`:
 ```bash
 sudo -u scandi npm run smoke:sandbox
 ```
+
+Besides isolation it checks that skills and `kit/` sync, skill scripts
+are executable, and a kit script reaches the Profit API through the
+gateway (needs §3.2a; `KIT_SMOKE=0` skips that check).
 
 The systemd unit needs nothing extra: `ReadWritePaths=/opt/scandi-jarvis`
 already covers `.sandbox/`, and the unit doesn't set `RestrictNamespaces`.
@@ -783,6 +847,14 @@ jarvis smoke
 # sent within N seconds. Useful right after `jarvis deploy`.
 ```
 
+### Scandi data APIs
+
+```bash
+cd /opt/scandi-jarvis && sudo -u scandi npm run smoke:kit
+# One cheap live read per configured service + write/bad-token refusals.
+# Run after rotating any Scandi API credential.
+```
+
 ### Webhook delivery health (on the bot side)
 
 ```bash
@@ -830,8 +902,9 @@ INFO  apps/whatsapp/dispatcher run started {"chat_jid":"…","triggering_seq":37
 INFO  apps/whatsapp/runner invoke {"chat_jid":"…","chat_type":"dm","triggering_seq":378,"mode":"delta",…,"thread_id":"…#mf3k2a1b","session_run":3,"prep_ms":180}
 INFO  core/tool-trace tool → whatsapp_react {"chat_jid":"…","input":"{\"emoji\":\"⏳\"}"}
 INFO  core/tool-trace tool ← whatsapp_react {"chat_jid":"…","output":"{\"ok\":true,…}","ms":312}
-INFO  core/tool-trace tool → SHOPIFY_GRAPH_QL_QUERY {"chat_jid":"…","input":"{\"query\":\"…\"}"}
-INFO  core/tool-trace tool ← SHOPIFY_GRAPH_QL_QUERY {"chat_jid":"…","output":"…","ms":1421}
+INFO  core/tool-trace tool → execute {"chat_jid":"…","input":"{\"command\":\"tsx /home/app/skills/jarvis/scandi-profit-api/scripts/profit.ts summary --days 7\"}"}
+INFO  integrations/kit-gateway kit call {"service":"profit","path":"/…","status":200,"bytes":…,"ms":…}
+INFO  core/tool-trace tool ← execute {"chat_jid":"…","output":"…","ms":…}
 INFO  tools/whatsapp/send-message sent message {"chat_jid":"…","seq":380,"chars":712}
 INFO  apps/whatsapp/runner run complete {"chat_jid":"…","ok":true,"aborted":false,"sent_message":true,…,"usage":{"model_calls":2,"input_tokens":…,"output_tokens":…,"cache_read_tokens":…,"cache_write_tokens":…},"duration_ms":4812}
 ```
@@ -841,8 +914,11 @@ of and how to read these fields, see
 [WHATSAPP.md §6.3](./WHATSAPP.md#63-latency).
 
 The `core/tool-trace` lines come from every tool call the agent
-makes — including subagents (Shopify, etc.) and Composio tools that
-don't log on their own. See `src/core/tool-trace.ts`.
+makes — including the `general-purpose` subagent. The
+`integrations/kit-gateway kit call` lines log every Scandi API call
+made from the sandbox (service, path or GraphQL operation, status,
+bytes, ms); refused writes log as `kit write refused` warnings. See
+`src/core/tool-trace.ts` and `src/integrations/kit-gateway.ts`.
 
 ---
 
@@ -864,6 +940,10 @@ don't log on their own. See `src/core/tool-trace.ts`.
 | `No sandbox provider could be started` in the journal                                              | Same as above, or `bubblewrap` not installed.                                                                      | `sudo bash scripts/setup-sandbox.sh` (§3.2b), then `jarvis restart`. Confirm with `npm run smoke:sandbox`.                     |
 | Sandboxed script fails with `ModuleNotFoundError` (Python)                                         | Toolchain not built, or the package isn't in `PY_PACKAGES`.                                                        | Rerun `sudo -u scandi npm run setup:sandbox`; for a new package add it to `PY_PACKAGES` in `scripts/setup-sandbox.sh` first.   |
 | Webhook deliveries pile up `pending` on the bot side                                               | Jarvis is up but each run takes longer than `WEBHOOK_TIMEOUT_MS` (default 10s). The webhook ACKs *before* the run starts so this is rare. | Check `jarvis logs` for slow tools. The dispatcher ACKs the webhook immediately; deliveries should be sub-second.        |
+| Kit script fails with `Kit gateway is not available in this environment (KIT_GATEWAY_URL unset)` | No Scandi API credentials configured (journal: `No Scandi API credentials configured – kit gateway not started`), or the run is on the Deno sandbox provider, which can't reach the gateway. | Add the credentials (§3.2a) and/or set `JARVIS_SANDBOX_PROVIDER=local`, then `jarvis restart`. |
+| `The "<service>" API is not configured on this Jarvis` (or gateway `503 service "…" is not configured`) | That service's env vars are missing or empty. The journal's `Kit gateway listening` line lists the enabled `services`. | Set the vars in §3.2a (Triple Whale also needs `SHOPIFY_STORE_DOMAIN`), `jarvis restart`, `npm run smoke:kit`. |
+| Shopify calls fail with `401` `Shopify token exchange failed: HTTP 4xx …`                        | Wrong `SHOPIFY_CLIENT_ID` / `SHOPIFY_CLIENT_SECRET` / `SHOPIFY_STORE_DOMAIN`, or a stray `\r` from a CRLF `.env`. Not retried. | Fix the values, `sed -i 's/\r$//' .env`, `jarvis restart`, `npm run smoke:kit`. |
+| Agent reports `403 … Jarvis's data access is read-only`                                           | The gateway refused a GraphQL mutation / subscription, an unparseable GraphQL document, or a non-GET REST call. Working as intended. | Nothing — a human makes the change. Only set `JARVIS_KIT_ALLOW_WRITES=true` if you really mean to let chat users write. |
 | `LANGSMITH_TRACING=true` but nothing shows up                                                      | `LANGSMITH_API_KEY` missing or project name typo'd.                                                                | Check `LANGSMITH_PROJECT` in `.env` matches a project you can see in smith.langchain.com.                                      |
 | Workflow `revolut-daily-expenses` fails: `RevolutExpensesHttpError: …` or `fetch failed` against `127.0.0.1:8080` | The `scandi-revolut-expenses` API isn't running on the droplet, or `REVOLUT_EXPENSES_API_KEY` doesn't match the API's `API_KEYS`. | `revolut status` / `revolut health` to confirm. Then re-check the key in `/opt/scandi-jarvis/.env` against `/opt/scandi-revolut-expenses/.env`. See [scandi-revolut-expenses/docs/DEPLOYMENT.md](../../scandi-revolut-expenses/docs/DEPLOYMENT.md). |
 
@@ -904,7 +984,7 @@ lives in Supabase:
 | Chat summaries + notes              | `jarvis.chat_context`                                       | Supabase daily snapshot            |
 | Webhook idempotency                 | `jarvis.wa_webhook_seen` (24h TTL — disposable)             | (no backup needed)                 |
 | LangGraph checkpoints (per session) | `langgraph.checkpoints`                                     | Supabase daily snapshot            |
-| `.env` (incl. any Deno token)       | `/opt/scandi-jarvis/.env`                                   | **You** — password manager copy.   |
+| `.env` (incl. Scandi API creds)     | `/opt/scandi-jarvis/.env`                                   | **You** — password manager copy.   |
 | Sandbox workspace + toolchain       | `/opt/scandi-jarvis/.sandbox/`                              | (scratch — rebuild with §3.2b)     |
 
 If a chat's checkpoint rows grow unwieldy, you can wipe its thread
@@ -970,13 +1050,18 @@ cp .env.example .env && nano .env
 #    SUPABASE_DB_URL=$(grep ^DATABASE_URL= /opt/scandi-wa-bot/.env | cut -d= -f2-)
 #    JARVIS_WA_ALLOWED_CHATS=*   # or a comma-separated whitelist
 #  Recommended:
-#    COMPOSIO_API_KEY=…   TAVILY_API_KEY=…
+#    TAVILY_API_KEY=…
+#    Scandi data APIs (§3.2a): PROFIT_API_BASE/KEY, SHOPIFY_STORE_DOMAIN/CLIENT_ID/CLIENT_SECRET,
+#      SKIO_API_KEY, META_APP_TOKEN, META_AD_ACCOUNT_IDS, TRIPLEWHALE_API_KEY
 #    LANGSMITH_TRACING=true LANGSMITH_API_KEY=… LANGSMITH_PROJECT=scandi-jarvis
 #  Sandbox: JARVIS_SANDBOX_PROVIDER=local is the default (see §3.2b)
+sed -i 's/\r$//' .env        # strip CRLF if the file was edited on Windows
 chmod 600 .env
 
 # ── 2b. sandbox (one-time, as root) ────────────────────────────────────
 sudo bash scripts/setup-sandbox.sh
+sudo -u scandi npm run smoke:sandbox
+sudo -u scandi npm run smoke:kit                          # Scandi data APIs, read-only
 
 # ── 3. migrate ─────────────────────────────────────────────────────────
 psql "$(grep ^SUPABASE_DB_URL= .env | cut -d= -f2-)" -f db/migrations/001_jarvis_init.sql

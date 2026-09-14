@@ -10,10 +10,12 @@ Jarvis is intentionally small right now — but the layout is chosen so that it 
 ├──────────────────────────────────────────────────────────────────────────┤
 │ agents/       Each agent = folder { index, prompt, tools }               │ ← personalities
 │ subagents/    Specialised, delegated-to agents with their own            │
-│               prompt/tools/skills (e.g. `shopify-agent`)                 │
+│               prompt/tools/skills (none declared today)                  │
 ├──────────────────────────────────────────────────────────────────────────┤
 │ tools/        Reusable tools, indexed in `registry.ts`                   │ ← capabilities
 │ skills/       On-disk Agent-Skills bundles, opted into per (sub)agent    │
+│ kit/          Scandi API clients + business knowledge, used by skills    │
+│ integrations/ Host-side services (the kit credential gateway)            │
 ├──────────────────────────────────────────────────────────────────────────┤
 │ core/         env, logger, model factory, deepagents wrapper,            │
 │               sandbox provisioning, skills-sync middleware               │ ← infrastructure
@@ -46,10 +48,10 @@ src/agents/jarvis/
 
 `build()` calls `buildAgent(definition)` from `core/agent.ts`, which:
 
-1. Resolves the model via `core/models.ts` (default: `anthropic:claude-opus-5`, configurable via `JARVIS_MODEL`; Anthropic options `JARVIS_EFFORT`, `JARVIS_FAST_MODE`, `JARVIS_REFUSAL_FALLBACK`).
+1. Resolves the model via `core/models.ts` (default: `anthropic:claude-opus-5`, configurable via `JARVIS_MODEL`; Anthropic options `JARVIS_EFFORT`, `JARVIS_FAST_MODE`, `JARVIS_REFUSAL_FALLBACK`). The model profile's `maxInputTokens` is capped at `JARVIS_CONTEXT_WINDOW_TOKENS` (default 300K) — DeepAgents' summarization middleware compacts a conversation at ~85% of that value (≈255K instead of ≈850K on a 1M-token model). The API limit itself is unchanged.
 2. Loads any declared Composio tools (no-op if `COMPOSIO_API_KEY` is unset) and merges them with the local tools.
 3. Resolves each subagent (its own tools, composio config, model, skill paths).
-4. Picks a backend (see [Backends below](#backends-filesystem-and-shell)) and, when the sandbox is enabled, attaches a `beforeAgent` middleware that mirrors `./skills/` into the sandbox.
+4. Picks a backend (see [Backends below](#backends-filesystem-and-shell)) and, when the sandbox is enabled, attaches a `beforeAgent` middleware that mirrors `./skills/` and `./kit/` into the sandbox.
 5. Calls `createDeepAgent({ name, model, tools, systemPrompt, subagents, backend, middleware, skills, checkpointer })`.
 6. Returns the compiled LangGraph agent — so callers can use `.invoke`, `.stream`, etc.
 
@@ -59,11 +61,11 @@ Specialised subagents (separate from the harness's auto-attached `general-purpos
 
 Subagents **share the parent's backend instance** (so the same sandbox + skills mount), but their `messages` and `todos` are isolated — only the final string result of a `task` call bubbles back to the parent.
 
-The canonical example is `shopify-agent`: it owns Shopify Admin GraphQL execution so the (often large) GraphQL transcripts and skill-script output stay out of jarvis's context. See [`docs/AGENTS.md`](./AGENTS.md) for the live inventory.
+No specialised subagents are declared today: `jarvis` uses its skills directly and hands long, data-heavy analyses to the auto-attached `general-purpose` subagent, which inherits the same tools and skill sets. See [`docs/AGENTS.md`](./AGENTS.md) for the live inventory.
 
 ## Skills
 
-`skills/<set>/<skill>/SKILL.md` are reusable, progressive-disclosure capability bundles. An agent or subagent opts into a skill set by name (`skillSets: ["shopify"]`); `buildAgent` mounts that set at the virtual path `/home/app/skills/<set>/`, and the DeepAgents skills middleware exposes each skill's `name` + `description` in the agent's system prompt. The full `SKILL.md` body is only read by the agent when the task matches.
+`skills/<set>/<skill>/SKILL.md` are reusable, progressive-disclosure capability bundles. An agent or subagent opts into a skill set by name (`skillSets: ["jarvis"]`); `buildAgent` mounts that set at the virtual path `/home/app/skills/<set>/`, and the DeepAgents skills middleware exposes each skill's `name` + `description` in the agent's system prompt. The full `SKILL.md` body is only read by the agent when the task matches.
 
 See [`docs/DEVELOPMENT.md#skills`](./DEVELOPMENT.md#skills) for the layout and authoring rules.
 
@@ -80,9 +82,43 @@ See [`docs/DEVELOPMENT.md#skills`](./DEVELOPMENT.md#skills) for the layout and a
 
 "Sandbox available" means `JARVIS_SANDBOX_PROVIDER` is `local` (default) or `deno` **and** a provider actually started; with `none`, or if startup fails, agents degrade to `StateBackend`.
 
-`JarvisSandbox` (see [`src/core/sandbox.ts`](../src/core/sandbox.ts)) is a process-singleton that extends deepagents' `BaseSandbox`, started on the first `buildAgent` call and shared across every agent and subagent in that Node process. It forwards `execute` / `uploadFiles` / `downloadFiles` to the live provider — a bubblewrap-isolated shell on the host ([`sandbox-local.ts`](../src/core/sandbox-local.ts)) or a Deno Deploy sandbox that fails over to local ([`sandbox-deno.ts`](../src/core/sandbox-deno.ts)) — and swaps providers underneath without the agent noticing. A `beforeAgent` middleware (see [`src/core/skills-sync.ts`](../src/core/skills-sync.ts)) health-checks the sandbox and mirrors `./skills/` into `/home/app/skills/...` before each invocation (skipped when unchanged), so scripts shipped with a skill can be executed via `execute` at the same path the agent reads them from.
+`JarvisSandbox` (see [`src/core/sandbox.ts`](../src/core/sandbox.ts)) is a process-singleton that extends deepagents' `BaseSandbox`, started on the first `buildAgent` call and shared across every agent and subagent in that Node process. It forwards `execute` / `uploadFiles` / `downloadFiles` to the live provider — a bubblewrap-isolated shell on the host ([`sandbox-local.ts`](../src/core/sandbox-local.ts)) or a Deno Deploy sandbox that fails over to local ([`sandbox-deno.ts`](../src/core/sandbox-deno.ts)) — and swaps providers underneath without the agent noticing. A `beforeAgent` middleware (see [`src/core/skills-sync.ts`](../src/core/skills-sync.ts)) health-checks the sandbox and mirrors `./skills/` into `/home/app/skills/...` and `./kit/` into `/home/app/kit/...` before each invocation (each skipped when unchanged), so scripts shipped with a skill can be executed via `execute` at the same path the agent reads them from.
 
 Detailed providers, isolation, lifecycle and env vars: [`docs/DEVELOPMENT.md#sandbox-shell--executable-skills`](./DEVELOPMENT.md#sandbox-shell--executable-skills).
+
+## Scandi data (kit gateway)
+
+Live business data — the Profit API (our dashboard), Shopify Admin, Skio, Meta Marketing API and Triple Whale — reaches the agent through **skills + sandboxed scripts**, not LangChain tools. Three pieces:
+
+- **`skills/jarvis/scandi-*`** — `SKILL.md` routing and rules, plus a CLI per service (`profit.ts`, `query.ts`, `skio.ts`, `creatives.ts`).
+- **`kit/`** — `kit/lib/*.ts` API clients (`profitApi`, `shopify`, `skio`, `meta`, `triplewhale`, plus `http` retry/pacing, `cache`, `args`, `fx`, `creativeName`, `env`) and `kit/knowledge/*.md` (business overview, metrics dictionary, profit model, MRR, ad structure, pitfalls, …). Ported from the desktop Scandi agent kit with the same logic, except `env.ts` holds no credentials and every network call goes to the gateway. Mirrored into the sandbox at `/home/app/kit/` like the skills.
+- **[`src/integrations/kit-gateway.ts`](../src/integrations/kit-gateway.ts)** — a `node:http` server on `127.0.0.1:<random port>` in the Jarvis process. It holds the credentials and forwards to the real APIs.
+
+**Request flow.**
+
+1. On the first local-sandbox start, `JarvisSandbox` calls `startKitGateway()`. It enables each service whose credentials are set, generates a per-process random token, and passes the sandbox `KIT_GATEWAY_URL`, `KIT_GATEWAY_TOKEN`, `KIT_SERVICES` and non-secret config (`SHOPIFY_STORE_DOMAIN`, `SHOPIFY_API_VERSION`, `META_API_VERSION`, `META_AD_ACCOUNT_IDS`) as extra env. No credentials are configured → no gateway, no kit env.
+2. The agent runs e.g. `tsx /home/app/skills/jarvis/scandi-profit-api/scripts/profit.ts summary --days 7`. The script imports `/home/app/kit/lib/profitApi.ts`, which asks `env.ts` for `gateway("profit")` (throwing a readable error if the gateway env is missing or the service isn't in `KIT_SERVICES`).
+3. The client calls `http://127.0.0.1:<port>/profit/<path>` with `x-kit-token`. The sandbox shares the host network namespace, so loopback reaches the gateway.
+4. The gateway checks the token, the service and the read-only policy, attaches the credential and forwards upstream:
+
+   | Gateway route                            | Upstream                                                             |
+   | ---------------------------------------- | -------------------------------------------------------------------- |
+   | `GET /profit/<path>`                     | `PROFIT_API_BASE/api/<path>` (Bearer key)                            |
+   | `POST /shopify/graphql`                  | `https://<SHOPIFY_STORE_DOMAIN>/admin/api/<version>/graphql.json`    |
+   | `POST /skio/graphql`                     | `https://graphql.skio.com/v1/graphql`                                |
+   | `GET /meta/<version>/<path>`             | `https://graph.facebook.com/<version>/<path>` (Bearer app token)     |
+   | `POST /triplewhale/summary-page/get-data` | `https://api.triplewhale.com/api/v2/summary-page/get-data`          |
+
+5. Upstream status, body and rate-limit / paging headers (`retry-after`, Meta throttle headers, `x-shopify-shop-api-call-limit`) pass straight back, so the kit clients' retry and pacing logic behaves as it does against the real API. The call is logged (`integrations/kit-gateway kit call`: service, path or GraphQL op, status, bytes, ms).
+6. The script prints a formatted answer. Slow pulls are cached under `/home/app/workspace/cache/` (`kit/lib/cache.ts`; e.g. the Meta creatives pull) for follow-ups; deliverables go to `/home/app/output/` and out via `whatsapp_send_file`.
+
+**Details worth knowing.**
+
+- **Read-only by default.** Unless `JARVIS_KIT_ALLOW_WRITES=true`, GraphQL bodies are parsed with `graphql-js` and any mutation or subscription is refused (Shopify's `bulkOperationRunQuery` is allowed — it only exports a query); documents that don't parse are refused too; REST calls must be `GET`. Refusals are `403` with a message the agent can relay.
+- **Shopify auth.** The gateway does the OAuth `client_credentials` exchange (`SHOPIFY_CLIENT_ID` / `SHOPIFY_CLIENT_SECRET`) and caches the token with an hour of headroom. Server errors in the exchange are retried; bad credentials fail at once as a `401` the kit client reports instead of retrying.
+- **Meta paging.** `paging.next` URLs point at graph.facebook.com; `kit/lib/meta.ts` rewrites them onto the gateway.
+- **Credentials are trimmed** on load (`core/env.ts`) — a CRLF-edited `.env` once broke Shopify and Triple Whale auth.
+- **Local sandbox only.** The Deno provider can't reach the host's loopback and gets no kit env, so the `scandi-*` skills fail there with `Kit gateway is not available in this environment`. The rest of `/home/app/kit` still syncs.
 
 ## Tools and the registry
 
@@ -96,7 +132,7 @@ LangGraph state (messages, todos, virtual files) is **per `thread_id`** with our
 
 Two important wrinkles when the sandbox is enabled:
 
-- **Skill files** live on host disk under `./skills/` and are **shared globally** — every thread, every agent, every subagent sees the same files.
+- **Skill and kit files** live on host disk under `./skills/` and `./kit/` and are **shared globally** — every thread, every agent, every subagent sees the same files.
 - **Sandbox filesystem** (anything the agent writes via `write_file("/home/app/...")`, `execute`, etc.) is **per process, not per thread**. The sandbox is a singleton, so files written in thread A (e.g. one WhatsApp chat) are visible to thread B. On the local provider `/home/app` also survives restarts (only `/tmp` is wiped on start). Namespace by `thread_id` in paths if you need isolation.
 
 ## Frontends

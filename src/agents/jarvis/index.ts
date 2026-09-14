@@ -1,5 +1,4 @@
 import { buildAgent, type AgentDefinition } from "../../core/agent.js";
-import { shopifySubagent } from "../../subagents/shopify/index.js";
 
 import { JARVIS_SYSTEM_PROMPT } from "./prompt.js";
 import { jarvisTools } from "./tools.js";
@@ -7,21 +6,19 @@ import { jarvisTools } from "./tools.js";
 /**
  * Declarative definition of the default Jarvis agent.
  *
- * Jarvis itself has *no* Shopify tools – every Shopify touchpoint is delegated
- * to the dedicated `shopify-agent` subagent (see `src/subagents/shopify/`).
- * That keeps the (often long) GraphQL transcripts and skill-script output out
- * of the main agent's context and centralises Shopify-specific conventions in
- * one place.
+ * Business data (Profit API, Shopify, Skio, Meta) comes from the Scandi skills
+ * in `skills/jarvis/`, which run kit scripts in the sandbox through the
+ * credential gateway. Heavy multi-step analysis goes to the built-in
+ * `general-purpose` subagent, which inherits the same skills.
  */
 export const definition: AgentDefinition = {
   name: "jarvis",
   description:
-    "General-purpose Scandi Gum operations assistant. Plans, researches, calculates, and drafts. Delegates all Shopify work to the shopify-agent subagent.",
+    "Scandi Gum operations assistant: live profit, MRR, Shopify, Skio and Meta numbers, research, documents and decks.",
   systemPrompt: JARVIS_SYSTEM_PROMPT,
   tools: jarvisTools,
   /** Docx and other shared capabilities under `skills/jarvis/`. GP subagent inherits these. */
   skillSets: ["jarvis"],
-  subagents: [shopifySubagent],
 };
 
 export async function build() {

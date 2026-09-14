@@ -275,6 +275,9 @@ pdftotext -bbox-layout document.pdf output.xml
 ```
 
 #### Advanced Image Conversion
+
+Use Poppler's `pdftoppm` (installed in the sandbox):
+
 ```bash
 # Convert to PNG images with specific resolution
 pdftoppm -png -r 300 document.pdf output_prefix

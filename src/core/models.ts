@@ -18,6 +18,8 @@ import { env } from "./env.js";
  *   - refusal fallbacks (`JARVIS_REFUSAL_FALLBACK`): on Opus 5 / Fable, a
  *     safety-classifier decline is retried server-side on a fallback model
  *     instead of ending the turn.
+ *   - working context window (`JARVIS_CONTEXT_WINDOW_TOKENS`, default 300K):
+ *     conversations are compacted before they grow past it.
  *
  * Temperature is **omitted by default** — Opus 4.7+ / Sonnet 5+ reject
  * sampling params. Set it only for older models.
@@ -75,7 +77,25 @@ export async function resolveModel(
     }
   }
 
-  return (await initChatModel(model, fields)) as unknown as BaseChatModel;
+  const chatModel = (await initChatModel(model, fields)) as unknown as BaseChatModel;
+  capContextWindow(chatModel, env.JARVIS_CONTEXT_WINDOW_TOKENS);
+  return chatModel;
+}
+
+/**
+ * DeepAgents' summarization middleware compacts a conversation at 85% of the
+ * model profile's `maxInputTokens` (1M on current Claude models). Lowering the
+ * profile's value is how we choose a smaller working window; the API limit
+ * itself is unchanged.
+ */
+function capContextWindow(model: BaseChatModel, maxTokens: number): void {
+  const profile = (model as { profile?: { maxInputTokens?: number } }).profile;
+  if (!profile || typeof profile.maxInputTokens !== "number") return;
+  if (profile.maxInputTokens <= maxTokens) return;
+  Object.defineProperty(model, "profile", {
+    value: { ...profile, maxInputTokens: maxTokens },
+    configurable: true,
+  });
 }
 
 /** Convenience constant: the default model identifier string. */

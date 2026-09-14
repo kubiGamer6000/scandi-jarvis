@@ -1,6 +1,6 @@
 # Jarvis
 
-Jarvis is the in-house AI agent harness for **Scandi Gum**. It's a TypeScript project built on [LangChain](https://docs.langchain.com/oss/javascript/langchain/) and [LangGraph](https://docs.langchain.com/oss/javascript/langgraph/) using the [DeepAgents](https://docs.langchain.com/oss/javascript/deepagents/overview) harness, designed to grow into a fleet of specialised agents that help us run the business: pulling data from Shopify and Meta Ads, generating reports, automating expense tracking, and so on.
+Jarvis is the in-house AI agent harness for **Scandi Gum**. It's a TypeScript project built on [LangChain](https://docs.langchain.com/oss/javascript/langchain/) and [LangGraph](https://docs.langchain.com/oss/javascript/langgraph/) using the [DeepAgents](https://docs.langchain.com/oss/javascript/deepagents/overview) harness, designed to grow into a fleet of specialised agents that help us run the business: answering questions from live profit, MRR, Shopify, Skio and Meta Ads data, generating reports and decks, automating expense tracking, and so on.
 
 The current default model is **Claude Opus 5** (`anthropic:claude-opus-5`), overridable via `JARVIS_MODEL`.
 
@@ -12,7 +12,9 @@ npm install
 
 # 2. configure
 cp .env.example .env
-# then put your ANTHROPIC_API_KEY (and optionally TAVILY_API_KEY) into .env
+# then put your ANTHROPIC_API_KEY (and optionally TAVILY_API_KEY and the
+# Scandi data API credentials: SHOPIFY_*, SKIO_API_KEY, META_*, PROFIT_API_*,
+# TRIPLEWHALE_API_KEY) into .env
 
 # 3. chat with the default Jarvis agent in your terminal
 npm run chat
@@ -54,8 +56,11 @@ src/
 ├── core/          shared building blocks (env, logger, model factory, agent factory)
 ├── tools/         reusable custom tools + a registry to compose them
 ├── agents/        each agent is a folder: prompt.ts + tools.ts + index.ts
+├── integrations/  host-side services (kit-gateway.ts: credential gateway for the Scandi data APIs)
 └── apps/          runnable entrypoints (CLI today, server / etc. later)
 
+skills/            Agent Skills bundles (skills/jarvis/: scandi-*, shopify-admin, shopifyql, docx, pdf, xlsx, pptx)
+kit/               Scandi API clients (lib/) + business knowledge (knowledge/), mirrored into the sandbox
 docs/              short living docs (read these before extending the project)
 frontends/         reserved for future React/visualization apps (own packages)
 ```
@@ -77,6 +82,8 @@ frontends/         reserved for future React/visualization apps (own packages)
 | `npm run chat:jarvis`   | Same, explicit                                                         |
 | `npm run smoke`         | Build every registered agent (no LLM call)                             |
 | `npm run test:tools`    | Functional check of the standalone custom tools                        |
+| `npm run smoke:sandbox` | Sandbox execution, isolation, skills + kit sync, a kit call via the gateway |
+| `npm run smoke:kit`     | Live read against every configured Scandi API + write-refusal checks   |
 | `npm run composio:list` | List the Composio tools wired into a toolkit (default: `SHOPIFY`)      |
 | `npm run bench:wa`      | WhatsApp reply-latency benchmark (real LLM calls, stubbed bot)         |
 | `npm run typecheck`     | `tsc --noEmit` over the whole project                                  |

@@ -24,6 +24,10 @@ const EnvSchema = z.object({
   JARVIS_FAST_MODE: z
     .union([z.literal("true"), z.literal("false")])
     .default("false"),
+  // Working context budget. Claude models accept up to 1M tokens, but a long
+  // conversation is compacted (older turns summarised) once it reaches ~85%
+  // of this — keeping calls fast and cheap. Must not exceed the model's limit.
+  JARVIS_CONTEXT_WINDOW_TOKENS: z.coerce.number().int().min(50_000).default(300_000),
   // Server-side refusal fallbacks on Opus 5 / Fable (see core/models.ts).
   JARVIS_REFUSAL_FALLBACK: z
     .union([z.literal("true"), z.literal("false")])
@@ -81,6 +85,28 @@ const EnvSchema = z.object({
   JARVIS_SANDBOX_TIMEOUT: z.string().min(1).default("session"),
   // Sandbox memory budget. Min 768MiB, max 4GiB on Deno.
   JARVIS_SANDBOX_MEMORY: z.string().min(1).default("1GiB"),
+
+  // --- Scandi data APIs (kit gateway, see src/integrations/kit-gateway.ts) --
+  // Credentials stay in this process; sandboxed scripts reach the APIs through
+  // a localhost gateway that injects them. Each service is enabled only when
+  // its credentials are set.
+  SHOPIFY_STORE_DOMAIN: z.string().trim().optional(),
+  SHOPIFY_CLIENT_ID: z.string().trim().optional(),
+  SHOPIFY_CLIENT_SECRET: z.string().trim().optional(),
+  SHOPIFY_API_VERSION: z.string().min(1).default("2026-01"),
+  SKIO_API_KEY: z.string().trim().optional(),
+  META_APP_TOKEN: z.string().trim().optional(),
+  META_API_VERSION: z.string().min(1).default("v25.0"),
+  META_AD_ACCOUNT_IDS: z.string().trim().default(""),
+  // Our own dashboard API (read-only key).
+  PROFIT_API_BASE: z.string().trim().url().optional(),
+  PROFIT_API_KEY: z.string().trim().optional(),
+  TRIPLEWHALE_API_KEY: z.string().trim().optional(),
+  // The gateway refuses writes (GraphQL mutations, non-GET calls) unless this
+  // is "true". Leave off: anyone who can message Jarvis can drive it.
+  JARVIS_KIT_ALLOW_WRITES: z
+    .union([z.literal("true"), z.literal("false")])
+    .default("false"),
 
   // --- observability -------------------------------------------------------
   LANGSMITH_TRACING: z

@@ -15,6 +15,12 @@ Custom tools live under `src/tools/<domain>/<name>.ts` and are indexed by stable
 | `internetSearch`     | [`web/internet-search.ts`](../src/tools/web/internet-search.ts)     | `TAVILY_API_KEY`                        | Web search via [Tavily](https://tavily.com/). Returns clear "not configured" error if the key is missing.          |
 | `tavilyDeepResearch` | [`web/deep-research.ts`](../src/tools/web/deep-research.ts)         | `TAVILY_API_KEY`                        | [Tavily Research](https://tavily.com/) — multi-search synthesis, **model `pro`**, polled until done. Slower than search; optional structured `output_schema`. |
 
+## Scandi data: skills, not tools
+
+Business data (Profit API, Shopify, Skio, Meta Ads, Triple Whale) is **not** exposed as LangChain tools. The agent reads a `scandi-*` skill under `/home/app/skills/jarvis/` and runs its script with `execute` (e.g. `tsx /home/app/skills/jarvis/scandi-profit-api/scripts/profit.ts summary --days 7`), or writes its own script against the clients in `/home/app/kit/lib/`. Output lands in the sandbox, so it can be cached, re-read and turned into files without passing through tool-call JSON.
+
+Credentials never enter the sandbox: the clients call the host-side **kit gateway** ([`src/integrations/kit-gateway.ts`](../src/integrations/kit-gateway.ts)), which injects keys and refuses writes. That means these skills need `execute` on the **local** sandbox plus the service's env vars. Skill inventory: [`docs/AGENTS.md#skills`](./AGENTS.md#skills). Design: [`docs/ARCHITECTURE.md` → Scandi data](./ARCHITECTURE.md#scandi-data-kit-gateway).
+
 ## Composio toolkits
 
 [Composio](https://composio.dev) gives the agent access to 500+ pre-built integrations behind a single API key — they handle OAuth, token refresh, and the per-tool wiring. We use it for anything we don't want to hand-build a tool for.
@@ -32,8 +38,8 @@ An agent **or subagent** enables Composio tools declaratively in its `definition
 export const definition: AgentDefinition = {
   // …,
   composio: {
-    toolkits: ["SHOPIFY"],            // entire toolkits, OR …
-    tools: ["SHOPIFY_GRAPH_QL_QUERY"], // specific tool slugs
+    toolkits: ["GMAIL"],               // entire toolkits, OR …
+    tools: ["<TOOLKIT>_<ACTION>"],     // specific tool slugs (see composio:list)
     important: true,                   // load only the curated subset (default true)
     limit: 50,                         // cap per toolkit (default 50)
   },
@@ -44,29 +50,27 @@ export const definition: AgentDefinition = {
 
 ### Currently connected Composio tools
 
-We tend to load **specific tool slugs** rather than entire toolkits — fewer, more flexible tools keep the agent's context lean while still covering the surface area we need. Tools are also typically scoped to a **subagent** rather than the main agent, so heavy/chatty integrations don't bloat the parent's context.
+None. The loader stays as generic plumbing; no agent or subagent declares Composio tools today. (Shopify used to go through `SHOPIFY_GRAPH_QL_QUERY` on a `shopify-agent` subagent; that was replaced by the Scandi skills and kit gateway above.)
 
-| Tool slug                | Toolkit | Used by                  | Auth                                  | Notes                                                                                       |
-| ------------------------ | ------- | ------------------------ | ------------------------------------- | ------------------------------------------------------------------------------------------- |
-| `SHOPIFY_GRAPH_QL_QUERY` | SHOPIFY | `shopify-agent` subagent | OAuth or API key, managed in Composio | Raw Shopify Admin GraphQL executor — covers products, orders, customers, inventory, metafields, etc. through one flexible tool. |
+We tend to load **specific tool slugs** rather than entire toolkits — fewer, more flexible tools keep the agent's context lean while still covering the surface area we need. Heavy/chatty integrations are better scoped to a **subagent** so they don't bloat the parent's context.
 
 To browse the full set of tools a toolkit exposes (handy when picking which slugs to enable):
 
 ```bash
-npm run composio:list                  # default: SHOPIFY
-npm run composio:list -- SHOPIFY GMAIL # multiple
+npm run composio:list                  # default toolkit: SHOPIFY
+npm run composio:list -- GMAIL SLACK   # multiple
 ```
 
 ### Adding another Composio capability
 
 1. In the [Composio dashboard](https://platform.composio.dev), connect the integration for your `COMPOSIO_USER_ID` (default: `default`).
 2. Decide whether you need:
-   - **a single flexible tool** (preferred — e.g. `SHOPIFY_GRAPH_QL_QUERY`, `META_ADS_GRAPHQL_QUERY` if available, etc.). Add to `composio.tools`.
+   - **a single flexible tool** (preferred — e.g. a raw GraphQL/query executor if the toolkit has one). Add to `composio.tools`.
    - **a curated handful of tools** — list each slug in `composio.tools`.
    - **the whole toolkit** — only when the toolkit is small and you genuinely want all of it. Use `composio.toolkits` with `important: true` and a `limit`.
 3. Update the agent's system prompt with usage hints / footguns specific to that tool (the model only sees the tool description by default — extra guidance about pagination, rate limits, mutation gotchas etc. should live in the prompt).
 4. Run `npm run composio:list -- <TOOLKIT_SLUG>` to discover slugs.
-5. Update the "Currently connected Composio tools" table above.
+5. Update the "Currently connected Composio tools" section above.
 
 ## Compose tools into an agent
 

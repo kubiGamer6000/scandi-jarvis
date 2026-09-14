@@ -4,25 +4,37 @@ sockets may be blocked (e.g., sandboxed VMs).  Detects the restriction
 at runtime and applies an LD_PRELOAD shim if needed.
 
 Usage:
-    from office.soffice import run_soffice, get_soffice_env
+    from office.soffice import run_soffice
 
-    # Option 1 – run soffice directly
     result = run_soffice(["--headless", "--convert-to", "pdf", "input.docx"])
 
-    # Option 2 – get env dict for your own subprocess calls
-    env = get_soffice_env()
-    subprocess.run(["soffice", ...], env=env)
+Call soffice through run_soffice, not through subprocess with get_soffice_env():
+the env dict carries the shim but names no user profile, and a non-root sandbox
+cannot bootstrap the default one -- soffice aborts with "User installation could
+not be completed" and converts nothing. get_soffice_env() stays public for the
+callers that build their own argv (they must pass -env:UserInstallation too).
 """
 
+import contextlib
 import os
 import socket
+import shutil
 import subprocess
+import sys
 import tempfile
+from collections.abc import Iterable
 from pathlib import Path
 
 
 def get_soffice_env() -> dict:
     env = os.environ.copy()
+
+    # The headless VCL plugin and the LD_PRELOAD shim are Linux-only. On
+    # Windows, soffice.exe is already headless-capable and there is no AF_UNIX
+    # to work around, so setting either does nothing useful.
+    if sys.platform == "win32":
+        return env
+
     env["SAL_USE_VCLPLUGIN"] = "svp"
 
     if _needs_shim():
@@ -32,9 +44,30 @@ def get_soffice_env() -> dict:
     return env
 
 
-def run_soffice(args: list[str], **kwargs) -> subprocess.CompletedProcess:
-    env = get_soffice_env()
-    return subprocess.run(["soffice"] + args, env=env, **kwargs)
+def run_soffice(args: Iterable[str], **kwargs) -> subprocess.CompletedProcess:
+    args = list(args)
+    with contextlib.ExitStack() as stack:
+        if not any(str(a).startswith("-env:UserInstallation") for a in args):
+            profile = stack.enter_context(
+                tempfile.TemporaryDirectory(prefix="lo_profile_", ignore_cleanup_errors=True)
+            )
+            args = [f"-env:UserInstallation={Path(profile).as_uri()}"] + args
+        return subprocess.run([_soffice_binary()] + args, env=get_soffice_env(), **kwargs)
+
+
+def _soffice_binary() -> str:
+    """Absolute path to soffice on Windows, where the installer omits PATH."""
+    if sys.platform != "win32":
+        return "soffice"
+    if shutil.which("soffice"):
+        return "soffice"
+    for base in (os.environ.get("ProgramFiles"), os.environ.get("ProgramFiles(x86)")):
+        if not base:
+            continue
+        candidate = Path(base) / "LibreOffice" / "program" / "soffice.exe"
+        if candidate.exists():
+            return str(candidate)
+    return "soffice"
 
 
 
@@ -42,11 +75,15 @@ _SHIM_SO = Path(tempfile.gettempdir()) / "lo_socket_shim.so"
 
 
 def _needs_shim() -> bool:
+    # AF_UNIX is absent on Windows, which raises AttributeError rather than
+    # OSError -- catch both or this crashes instead of reporting "no shim".
+    if sys.platform == "win32":
+        return False
     try:
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         s.close()
         return False
-    except OSError:
+    except (OSError, AttributeError):
         return True
 
 

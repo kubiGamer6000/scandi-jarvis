@@ -35,6 +35,12 @@ const log = createLogger("core/agent");
 const SKILLS_ROOT = path.resolve(process.cwd(), "skills");
 
 /**
+ * The Scandi kit (API clients + business knowledge), mirrored into the sandbox
+ * at `/home/app/kit` next to the skills that use it.
+ */
+const KIT_ROOT = path.resolve(process.cwd(), "kit");
+
+/**
  * Virtual base path where skills are mounted in the agent's filesystem.
  *
  * We deliberately mirror the Deno sandbox working directory (`/home/app`)
@@ -247,6 +253,7 @@ export async function buildAgent(def: AgentDefinition) {
             sandbox,
             skillsRoot: SKILLS_ROOT,
             virtualPrefix: SKILLS_VIRTUAL_PREFIX,
+            extraDirs: [{ hostDir: KIT_ROOT, target: "/home/app/kit" }],
           }),
         ]
       : [];

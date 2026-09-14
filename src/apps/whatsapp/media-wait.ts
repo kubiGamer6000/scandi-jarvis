@@ -25,7 +25,7 @@ const log = createLogger("apps/whatsapp/media-wait");
 export interface WaitForMediaOptions {
   /** Override the env default; mostly useful for tests. */
   maxWaitMs?: number;
-  /** Initial backoff between polls (then 2x up to 5s ceiling). */
+  /** Initial backoff between polls (then 2x up to a 1.5s ceiling). */
   initialBackoffMs?: number;
   signal?: AbortSignal;
 }
@@ -44,6 +44,11 @@ function needsWait(m: MessagePayload | null | undefined): boolean {
   return media.download_status === "pending" || media.download_status === "in_progress";
 }
 
+/** Media older than this in the context window is not waited on. */
+const RECENT_MEDIA_MAX_AGE_MS = 5 * 60_000;
+/** Non-trigger media gets a shorter wait than the triggering message. */
+const RECENT_MEDIA_MAX_WAIT_MS = 20_000;
+
 export async function waitForMessageMedia(
   client: WhatsappClient,
   seq: number,
@@ -51,7 +56,7 @@ export async function waitForMessageMedia(
 ): Promise<MessagePayload | null> {
   const maxWait = opts.maxWaitMs ?? env.JARVIS_WA_MEDIA_WAIT_MS;
   const start = Date.now();
-  let backoff = opts.initialBackoffMs ?? 1_000;
+  let backoff = opts.initialBackoffMs ?? 500;
 
   // Cheap first check; common case is the media is already processed.
   let current: MessagePayload | null = null;
@@ -73,7 +78,9 @@ export async function waitForMessageMedia(
       max_wait_ms: maxWait,
     });
     await sleep(backoff, opts.signal);
-    backoff = Math.min(backoff * 2, 5_000);
+    // Short cap: getMessage is a local API call, and every second we sleep
+    // past the moment the transcript lands is a second the user waits.
+    backoff = Math.min(backoff * 2, 1_500);
     try {
       current = await client.getMessage(
         seq,
@@ -110,7 +117,13 @@ export async function waitForRecentMedia(
   recent: MessagePayload[],
   opts: WaitForMediaOptions = {},
 ): Promise<MessagePayload[]> {
-  const pending = recent.filter(needsWait);
+  // Only wait on media that arrived in the last few minutes. Older items that
+  // are still unprocessed are stuck in a backlog or failed; waiting on them
+  // stalled every reply in the chat by the full timeout.
+  const now = Date.now();
+  const pending = recent.filter(
+    (m) => needsWait(m) && now - Date.parse(m.timestamp) < RECENT_MEDIA_MAX_AGE_MS,
+  );
   if (pending.length === 0) return recent;
 
   log.info("polling unprocessed media", {
@@ -118,9 +131,13 @@ export async function waitForRecentMedia(
     total_in_window: recent.length,
   });
 
+  const windowOpts: WaitForMediaOptions = {
+    ...opts,
+    maxWaitMs: Math.min(opts.maxWaitMs ?? env.JARVIS_WA_MEDIA_WAIT_MS, RECENT_MEDIA_MAX_WAIT_MS),
+  };
   const updates = await Promise.all(
     pending.map(async (m) => {
-      const fresh = await waitForMessageMedia(client, m.seq, opts);
+      const fresh = await waitForMessageMedia(client, m.seq, windowOpts);
       return fresh ?? m;
     }),
   );

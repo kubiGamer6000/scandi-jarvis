@@ -23,8 +23,10 @@ export function createSkillsSandboxSyncMiddleware(opts: {
   sandbox: JarvisSandbox;
   skillsRoot: string;
   virtualPrefix: string;
+  /** Other host directories skills depend on (e.g. the Scandi kit). */
+  extraDirs?: Array<{ hostDir: string; target: string }>;
 }) {
-  const { sandbox, skillsRoot, virtualPrefix } = opts;
+  const { sandbox, skillsRoot, virtualPrefix, extraDirs = [] } = opts;
 
   return createMiddleware({
     name: "JarvisSkillsSandboxSync",
@@ -32,6 +34,7 @@ export function createSkillsSandboxSyncMiddleware(opts: {
       try {
         await sandbox.refresh();
         await sandbox.syncDirectory(skillsRoot, virtualPrefix);
+        for (const dir of extraDirs) await sandbox.syncDirectory(dir.hostDir, dir.target);
       } catch (err) {
         // Never fail the run over this: the agent can still work, only skill
         // scripts would be missing.

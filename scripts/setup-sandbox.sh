@@ -5,16 +5,19 @@
 #   bash scripts/setup-sandbox.sh --tools-only    # (re)build the toolchain only, no sudo
 #
 # What it does:
-#   1. apt: bubblewrap + CLI tools the skills use (poppler, qpdf, pandoc, tesseract).
+#   1. apt: bubblewrap + CLI tools the skills use (poppler, qpdf, pandoc,
+#      tesseract, LibreOffice for xlsx recalculation and pptx/docx rendering).
 #   2. AppArmor: Ubuntu 24.04 blocks unprivileged user namespaces by default
 #      (kernel.apparmor_restrict_unprivileged_userns=1). This adds a profile
 #      that lets /usr/bin/bwrap — and only bwrap — create them.
 #   3. Toolchain at $SANDBOX_DIR/tools, mounted read-only inside the sandbox:
-#      a Python venv (pypdf, pdfplumber, reportlab, python-docx, …) and
-#      node_modules (docx). Built as the app user, never root.
+#      a Python venv (pypdf, pdfplumber, reportlab, python-docx, python-pptx,
+#      openpyxl, markitdown, …) and node_modules (tsx for the Scandi kit
+#      scripts, docx, pptxgenjs, react-icons + sharp). Built as the app user.
 #
 # Env overrides: APP_DIR (default /opt/scandi-jarvis), APP_USER (default: owner
-# of APP_DIR), SANDBOX_DIR (default $APP_DIR/.sandbox), WITH_LIBREOFFICE=1.
+# of APP_DIR), SANDBOX_DIR (default $APP_DIR/.sandbox), WITH_LIBREOFFICE=0 to skip
+# LibreOffice (~400 MB; the xlsx/pptx skills need it to recalculate and render).
 
 set -euo pipefail
 
@@ -24,9 +27,9 @@ TOOLS_DIR="$SANDBOX_DIR/tools"
 
 PY_PACKAGES=(
   pypdf pdfplumber reportlab pypdfium2 pdf2image pytesseract pillow
-  python-docx openpyxl pandas defusedxml lxml
+  python-docx python-pptx openpyxl pandas defusedxml lxml "markitdown[pptx,docx,xlsx]"
 )
-NODE_PACKAGES=(docx)
+NODE_PACKAGES=(tsx docx pptxgenjs react react-dom react-icons sharp)
 
 build_tools() {
   echo "==> toolchain in $TOOLS_DIR"
@@ -58,9 +61,9 @@ APP_USER=${APP_USER:-$(stat -c %U "$APP_DIR")}
 
 echo "==> apt packages"
 apt-get update -qq
-packages=(bubblewrap python3-venv poppler-utils qpdf pandoc tesseract-ocr)
-if [ "${WITH_LIBREOFFICE:-0}" = "1" ]; then
-  packages+=(libreoffice-writer-nogui)
+packages=(bubblewrap python3-venv poppler-utils qpdf pandoc tesseract-ocr fonts-dejavu fonts-liberation)
+if [ "${WITH_LIBREOFFICE:-1}" = "1" ]; then
+  packages+=(libreoffice-writer-nogui libreoffice-calc-nogui libreoffice-impress-nogui)
 fi
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${packages[@]}"
 
