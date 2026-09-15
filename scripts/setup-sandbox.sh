@@ -86,14 +86,10 @@ fi
 echo "==> sandbox dir $SANDBOX_DIR (owner $APP_USER)"
 install -d -o "$APP_USER" -g "$APP_USER" "$SANDBOX_DIR"
 
-export -f build_tools
-export TOOLS_DIR PY_PACKAGES_STR="${PY_PACKAGES[*]}" NODE_PACKAGES_STR="${NODE_PACKAGES[*]}"
-sudo -u "$APP_USER" -H bash -c '
-  set -euo pipefail
-  read -ra PY_PACKAGES <<< "$PY_PACKAGES_STR"
-  read -ra NODE_PACKAGES <<< "$NODE_PACKAGES_STR"
-  build_tools
-'
+# Re-invoke this script as the app user (sudo strips exported shell functions,
+# so calling build_tools through `sudo bash -c` doesn't work).
+sudo -u "$APP_USER" -H env APP_DIR="$APP_DIR" SANDBOX_DIR="$SANDBOX_DIR" \
+  bash "$(readlink -f "$0")" --tools-only
 
 echo "==> self-test"
 sudo -u "$APP_USER" bwrap --unshare-all --ro-bind /usr /usr --symlink usr/bin /bin \
