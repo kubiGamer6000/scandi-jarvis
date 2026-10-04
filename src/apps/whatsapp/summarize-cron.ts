@@ -52,7 +52,11 @@ async function activeChats(): Promise<string[]> {
        from jarvis.chat_context
       where enabled = true`,
   );
-  return res.rows.map((r) => r.chat_jid).filter(isChatAllowed);
+  // Groups must still be on the allowlist; DM rows only exist for chats an
+  // allowed sender already talked in, so they stay eligible.
+  return res.rows
+    .map((r) => r.chat_jid)
+    .filter((jid) => !jid.endsWith("@g.us") || isChatAllowed(jid));
 }
 
 async function onePass(): Promise<void> {

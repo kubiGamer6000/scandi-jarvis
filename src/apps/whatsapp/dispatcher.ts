@@ -7,7 +7,7 @@ import { parseCommand } from "./commands.js";
 import { messageAddressesBot, messageMentionsBot } from "./mentions.js";
 import { runOnce, type RunOutcome } from "./runner.js";
 import type { MessagePayload } from "./types.js";
-import { isChatAllowed } from "./whitelist.js";
+import { isMessageAllowed } from "./whitelist.js";
 
 const log = createLogger("apps/whatsapp/dispatcher");
 
@@ -390,13 +390,9 @@ export class Dispatcher {
     if (m.from_me) return false;
     if (this.deps.self.pnJid && m.from.jid === this.deps.self.pnJid) return false;
     if (this.deps.self.lidJid && m.from.jid === this.deps.self.lidJid) return false;
-    if (!isChatAllowed(m.chat.jid)) {
-      log.debug("dropping non-whitelisted chat", {
-        chat_jid: m.chat.jid,
-        seq: m.seq,
-      });
-      return false;
-    }
+    // Access gate: approved people only, and groups only where Jarvis is
+    // allowed. Everything else stops here — no run, no typing, no LLM call.
+    if (!isMessageAllowed(m)) return false;
     // Be defensive: the bot's `chat.type` enum is "dm"|"group" per docs but
     // it has been observed to return "lid" for LID-addressed chats. Always
     // also check the JID suffix — every group JID ends in `@g.us`.

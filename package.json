@@ -13,6 +13,7 @@
     "smoke": "tsx scripts/smoke-test.ts",
     "smoke:sandbox": "tsx scripts/sandbox-smoke.ts",
     "smoke:kit": "tsx scripts/kit-gateway-smoke.ts",
+    "check:access": "tsx scripts/access-gate-check.ts",
     "setup:sandbox": "bash scripts/setup-sandbox.sh --tools-only",
     "smoke:wa-client": "tsx scripts/wa-client-smoke.ts",
     "smoke:wa-dispatcher": "tsx scripts/wa-dispatcher-smoke.ts",

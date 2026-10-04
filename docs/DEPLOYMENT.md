@@ -140,7 +140,8 @@ Required vars (everything else has sensible defaults — see `.env.example`):
 | `WA_BOT_TOKEN`            | **Same value** as the bot's `API_AUTH_TOKEN` (`/opt/scandi-wa-bot/.env`).                   |
 | `WA_WEBHOOK_SECRET`       | Generate with `openssl rand -hex 32`. We'll register it with the bot in §6.                 |
 | `SUPABASE_DB_URL`         | Same Supabase pooler URI the bot uses (port 6543). Jarvis owns its own `jarvis.*` schema.   |
-| `JARVIS_WA_ALLOWED_CHATS` | `*` to allow every chat, or a comma-separated whitelist of chat JIDs. Fail-closed by default. |
+| `JARVIS_WA_ALLOWED_SENDERS` | **Who may use Jarvis**: comma-separated phone numbers / LIDs. Fail-closed; the server refuses to start if empty. Applies to DMs and groups. |
+| `JARVIS_WA_ALLOWED_CHATS` | Group JIDs Jarvis participates in. DMs from allowed senders need no entry. `*` allows every group (dev only). |
 | `JARVIS_WA_HOST`          | `127.0.0.1` (default). **Do not** bind to `0.0.0.0` — we never expose Jarvis publicly.      |
 | `JARVIS_WA_PORT`          | `3000` (default).                                                                           |
 
@@ -817,8 +818,9 @@ jarvis health
 
 - `wa_bot_connected:true` means we can reach the bot's `/v1/health` and
   its WhatsApp socket is up.
-- `allowed_chats:-1` means `*` (everything). A positive number is the
-  count of JIDs in `JARVIS_WA_ALLOWED_CHATS`.
+- `allowed_chats:-1` means `*` (every group). A positive number is the
+  count of JIDs in `JARVIS_WA_ALLOWED_CHATS`; `allowed_senders` is the same
+  for `JARVIS_WA_ALLOWED_SENDERS` (see WHATSAPP.md § Access control).
 
 UptimeRobot / Healthchecks.io can't hit this through Caddy (we
 deliberately don't expose Jarvis publicly), so if you want external
@@ -932,7 +934,7 @@ bytes, ms); refused writes log as `kit write refused` warnings. See
 | Bot delivers but Jarvis returns 401 / 403 on `/wa-webhook`                                         | `WA_WEBHOOK_SECRET` mismatch between Jarvis's `.env` and the subscription's `secret`.                              | Re-`PATCH /v1/webhooks/<id>` with the right `secret`, or roll a new one and update both.                                       |
 | `400 querystring/after_seq must be >= 1`                                                           | Old build that paged messages with `after_seq=0` on first-summary runs. Fixed; redeploy.                            | `jarvis deploy`.                                                                                                               |
 | `400 A maximum of 4 blocks with cache_control may be provided`                                     | Too many `cache_control` markers in one request. Prompt caching is enabled (DeepAgents' middleware: system prompt + last message), which stays under the cap on its own. | Look for extra `cache_control` markers added by custom middleware or the context block (`context.ts`) and remove them.          |
-| Agent runs, replies are sent, but the user sees nothing                                            | `JARVIS_WA_ALLOWED_CHATS` doesn't include the chat's JID. The dispatcher silently drops disallowed chats.          | Add the JID (use `*` for fully open) and `jarvis restart`.                                                                     |
+| Agent runs, replies are sent, but the user sees nothing                                            | The sender isn't in `JARVIS_WA_ALLOWED_SENDERS`, or it's a group not in `JARVIS_WA_ALLOWED_CHATS`. Both drop the message before any run; `jarvis logs` shows `ignoring message from sender not on the allowlist`. | Add the number (or group JID) and `jarvis restart`.                                                                     |
 | `whatsapp_send_file` returns `File '…' not found` instantly                                        | The WA file tools are using a different backend from `write_file` / `execute`.                                     | Already fixed in `src/apps/whatsapp/agent.ts` (passes the shared sandbox). Redeploy.                                           |
 | Agent reports the wrong local time                                                                 | Old build that defaulted to UTC and let the agent do TZ math.                                                      | `jarvis deploy`. Current tool defaults to `Europe/Stockholm` and returns `tz_abbrev`/`utc_offset` so there's no math to do.    |
 | `MemoryMax=1500M` killed the service mid-run                                                       | Long session + big sandboxed tool output blew the cap.                                                             | Edit the unit, bump to `2G`, `daemon-reload`, restart. Long-term: tighten `JARVIS_WA_CONTEXT_MSGS` or `summarizationMiddleware`. |
@@ -1048,7 +1050,8 @@ cp .env.example .env && nano .env
 #    WA_BOT_TOKEN=$(grep ^API_AUTH_TOKEN= /opt/scandi-wa-bot/.env | cut -d= -f2-)
 #    WA_WEBHOOK_SECRET=$(openssl rand -hex 32)
 #    SUPABASE_DB_URL=$(grep ^DATABASE_URL= /opt/scandi-wa-bot/.env | cut -d= -f2-)
-#    JARVIS_WA_ALLOWED_CHATS=*   # or a comma-separated whitelist
+#    JARVIS_WA_ALLOWED_SENDERS=<phone numbers allowed to use Jarvis>
+#    JARVIS_WA_ALLOWED_CHATS=<group JIDs>   # DMs need no entry
 #  Recommended:
 #    TAVILY_API_KEY=…
 #    Scandi data APIs (§3.2a): PROFIT_API_BASE/KEY, SHOPIFY_STORE_DOMAIN/CLIENT_ID/CLIENT_SECRET,

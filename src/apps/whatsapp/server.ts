@@ -11,7 +11,7 @@ import { createWhatsappClient } from "./client.js";
 import { Dispatcher } from "./dispatcher.js";
 import { purgeExpired } from "./idempotency.js";
 import { registerWebhookRoute } from "./webhook.js";
-import { allowedChatCount } from "./whitelist.js";
+import { allowedChatCount, allowedSenderCount } from "./whitelist.js";
 
 const log = createLogger("apps/whatsapp/server");
 
@@ -29,12 +29,18 @@ async function preflightChecks(): Promise<void> {
     log.error(`Missing required env vars: ${missing.join(", ")}`);
     process.exit(1);
   }
-  if (allowedChatCount() === 0) {
+  if (allowedSenderCount() === 0) {
     log.error(
-      "JARVIS_WA_ALLOWED_CHATS is empty — Jarvis would drop every message. " +
-        "Set this to '*' (fully open) or a comma-separated JID list.",
+      "JARVIS_WA_ALLOWED_SENDERS is empty — Jarvis would ignore everyone. " +
+        "Set it to the phone numbers allowed to talk to Jarvis (comma-separated).",
     );
     process.exit(1);
+  }
+  if (allowedChatCount() === 0) {
+    log.warn(
+      "JARVIS_WA_ALLOWED_CHATS is empty — Jarvis will only answer DMs from " +
+        "allowed senders, never in a group. Add group JIDs to enable groups.",
+    );
   }
   if (!isDbConfigured()) {
     log.error("SUPABASE_DB_URL is not configured (impossible given preflight, but just in case).");
@@ -43,6 +49,7 @@ async function preflightChecks(): Promise<void> {
 
   log.info("preflight: env OK", {
     allowed_chats: allowedChatCount(),
+    allowed_senders: allowedSenderCount(),
   });
 
   // Probe DB.
@@ -133,6 +140,7 @@ async function buildServer(): Promise<{
       ok: true,
       wa_bot_connected: waHealthy,
       allowed_chats: allowedChatCount(),
+      allowed_senders: allowedSenderCount(),
       uptime_s: Math.floor(process.uptime()),
     };
   });

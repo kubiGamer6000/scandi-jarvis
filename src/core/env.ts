@@ -124,9 +124,15 @@ const EnvSchema = z.object({
   // Shared secret returned by `POST /v1/webhooks` (used to verify the
   // HMAC-SHA256 signature on every webhook delivery).
   WA_WEBHOOK_SECRET: z.string().optional(),
-  // Comma-separated whitelist of chat JIDs Jarvis is allowed to respond in.
-  // Empty / unset = no chats allowed (fail closed). Use "*" to allow all.
+  // Comma-separated whitelist of GROUP chat JIDs Jarvis may participate in.
+  // Empty / unset = no groups (fail closed). "*" allows all (dev only).
   JARVIS_WA_ALLOWED_CHATS: z.string().default(""),
+  // Comma-separated whitelist of people who may talk to Jarvis, as phone
+  // numbers or LIDs (both forms of the same person are matched). Applies to
+  // DMs and to messages inside allowed groups. Empty / unset = nobody
+  // (fail closed); "*" allows anyone (dev only). Anything from someone else
+  // is dropped before a run starts — see apps/whatsapp/whitelist.ts.
+  JARVIS_WA_ALLOWED_SENDERS: z.string().default(""),
   // HTTP port the WhatsApp frontend Fastify app listens on.
   JARVIS_WA_PORT: z.coerce.number().int().min(1).max(65535).default(3000),
   // Host the Fastify app binds to. Default 127.0.0.1 so a misconfigured

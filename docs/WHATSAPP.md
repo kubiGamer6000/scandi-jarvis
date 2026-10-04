@@ -34,7 +34,7 @@ LangGraph state is persisted to Postgres via `PostgresSaver`, per **session** (`
 | `src/apps/whatsapp/typing.ts`                                 | Holds the "typing…" indicator open for the lifetime of a run.                            |
 | `src/apps/whatsapp/idempotency.ts`                            | Postgres-backed webhook-ID dedupe with 24h TTL.                                         |
 | `src/apps/whatsapp/commands.ts`                               | Pure slash-command parser (`/stop`).                                                    |
-| `src/apps/whatsapp/whitelist.ts`                              | `JARVIS_WA_ALLOWED_CHATS` matcher.                                                      |
+| `src/apps/whatsapp/whitelist.ts`                              | Access gate: allowed senders (people) + allowed group chats.                            |
 | `src/apps/whatsapp/client.ts`                                 | Typed REST client for the WA bot HTTP API.                                              |
 | `src/apps/whatsapp/agent.ts`                                  | Composes the `jarvis-whatsapp` agent (Jarvis + WA tools + middleware).                  |
 | `src/tools/whatsapp/*.ts`                                     | 8 WA-aware tools (send, react, edit, pull/send file, fetch, get, remember).             |
@@ -57,7 +57,8 @@ WA_WEBHOOK_SECRET=...
 # Server
 JARVIS_WA_HOST=0.0.0.0
 JARVIS_WA_PORT=8088
-JARVIS_WA_ALLOWED_CHATS=120363xxx@g.us,49xxx@s.whatsapp.net
+JARVIS_WA_ALLOWED_SENDERS=359884430293,46768505515,46704832998   # who may use Jarvis
+JARVIS_WA_ALLOWED_CHATS=120363xxx@g.us,49xxx@s.whatsapp.net   # groups it participates in
 
 # Tuning (defaults shown)
 JARVIS_WA_DEBOUNCE_MS=2500
@@ -136,6 +137,34 @@ Runs hourly by default. Applies the same refresh policy as the server's backgrou
 Optional: the webhook server already refreshes summaries in the background after runs. Deploy as a sidecar / cron job alongside it if you want quiet chats kept warm too.
 
 ---
+
+## Access control
+
+Two gates in [`whitelist.ts`](../src/apps/whatsapp/whitelist.ts), both applied in
+`Dispatcher.ingest` **before** anything else — no debounce, no typing indicator,
+no model call, and `/stop` from an outsider does nothing:
+
+| Gate | Env | Applies to |
+|---|---|---|
+| People | `JARVIS_WA_ALLOWED_SENDERS` | every inbound message, DM or group |
+| Groups | `JARVIS_WA_ALLOWED_CHATS` | group chats only |
+
+A DM from an allowed sender needs no chat entry: a DM's JID flips between PN
+(`4670…@s.whatsapp.net`) and LID (`1873…@lid`) form, so listing it is
+unreliable. Senders are matched on the bare id (digits before `:` or `@`), so
+the phone number, the LID and a device-suffixed LID (`…:25@lid`) all resolve to
+the same person — list whichever you have, both is safest.
+
+Both default to empty, which means nobody: the server refuses to start with no
+allowed senders, and warns when no group is listed. `*` opens a gate entirely
+and is for local development only — Jarvis reads live business data.
+
+Groups keep the addressing rule on top: an allowed sender must still @-mention
+Jarvis or reply to one of its messages.
+
+`npm run check:access` asserts the truth table (the three of us in every
+identity form, strangers in DMs and groups, unapproved groups, lookalike
+numbers).
 
 ## 5. State machine
 
